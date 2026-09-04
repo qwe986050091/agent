@@ -1,15 +1,16 @@
 package com.example.agent.controller;
 
 import com.example.agent.agent.SimpleAgent;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 /**
  * Agent REST API
  *
- * Examples:
- *  GET  /api/agent/health
- *  GET  /api/agent/chat?userId=u1&message=今天几号
- *  POST /api/agent/chat   {"userId":"u1","message":"(12+8)*3/5 等于几"}
+ * 调用前必须传递非空 message，否则会返回 400 BadRequest。
+ * （LangChain4j 的 prepareUserMessage 在空消息时会抛 IllegalConfigurationException：
+ *   "does not have a user message defined" —— 本质就是"用户消息为空"）
  */
 @RestController
 @RequestMapping("/api/agent")
@@ -17,28 +18,44 @@ public class AgentController {
 
     private final SimpleAgent simpleAgent;
 
-    // 构造器注入（Spring 4.3+ 单构造器自动 @Autowired）
     public AgentController(SimpleAgent simpleAgent) {
         this.simpleAgent = simpleAgent;
     }
 
     @GetMapping("/chat")
-    public ChatResponse chatGet(@RequestParam(defaultValue = "default") String userId,
-                                @RequestParam String message) {
+    public ResponseEntity<?> chatGet(@RequestParam(defaultValue = "default") String userId,
+                                     @RequestParam String message) {
+        ResponseEntity<?> bad = requireMessage(message);
+        if (bad != null) return bad;
         String answer = simpleAgent.chat(userId, message);
-        return new ChatResponse(userId, message, answer);
+        return ResponseEntity.ok(new ChatResponse(userId, message, answer));
     }
 
     @PostMapping("/chat")
-    public ChatResponse chatPost(@RequestBody ChatRequest request) {
+    public ResponseEntity<?> chatPost(@RequestBody ChatRequest request) {
+        if (request == null) {
+            return ResponseEntity.badRequest().body(new ErrorResponse("BAD_REQUEST", "请求体为空"));
+        }
         String uid = request.getUserId() == null ? "default" : request.getUserId();
-        String answer = simpleAgent.chat(uid, request.getMessage());
-        return new ChatResponse(uid, request.getMessage(), answer);
+        String msg = request.getMessage();
+        ResponseEntity<?> bad = requireMessage(msg);
+        if (bad != null) return bad;
+        String answer = simpleAgent.chat(uid, msg);
+        return ResponseEntity.ok(new ChatResponse(uid, msg, answer));
     }
 
     @GetMapping("/health")
     public String health() {
         return "Simple Agent is running! Powered by LangChain4j + Spring Boot.";
+    }
+
+    // ===== 入参校验：message 不能为 null / 空串 / 全空白 =====
+    private ResponseEntity<?> requireMessage(String message) {
+        if (message == null || message.trim().isEmpty()) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(new ErrorResponse("EMPTY_MESSAGE", "参数 message 不能为空或纯空白字符"));
+        }
+        return null;
     }
 
     // ===== 手写 DTO，避免依赖 Lombok 注解处理器 =====
@@ -74,5 +91,23 @@ public class AgentController {
         public void setQuestion(String question) { this.question = question; }
         public String getAnswer() { return answer; }
         public void setAnswer(String answer) { this.answer = answer; }
+    }
+
+    /** 通用错误响应体 */
+    public static class ErrorResponse {
+        private String code;
+        private String message;
+
+        public ErrorResponse() {}
+
+        public ErrorResponse(String code, String message) {
+            this.code = code;
+            this.message = message;
+        }
+
+        public String getCode() { return code; }
+        public void setCode(String code) { this.code = code; }
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
     }
 }

@@ -1,0 +1,99 @@
+# ===========================================
+# Simple Agent (LangChain4j + Spring Boot) .gitignore
+# ===========================================
+
+# ---------- 1. Java / Maven 构建产物 ----------
+target/
+build/
+out/
+*.class
+*.jar
+*.nar
+*.war
+*.ear
+*.zip
+*.tar.gz
+*.rar
+hs_err_pid*
+replay_pid*
+
+# Maven 本地生成的 wrapper 发行版
+.mvn/wrapper/maven-wrapper-linux-x86_64
+.mvn/wrapper/maven-wrapper-macosx-x86_64
+.mvn/wrapper/maven-wrapper-windows-x86_64.exe
+# 注意：不忽略 .mvn/wrapper/maven-wrapper.jar 和 mvnw.cmd
+# 这样团队成员不用装 Maven 也能直接跑
+
+# ---------- 2. IDE / 编辑器 ----------
+# IntelliJ IDEA
+.idea/
+*.iws
+*.iml
+*.ipr
+# Eclipse
+.project
+.classpath
+.settings/
+.factorypath
+# VS Code
+.vscode/
+*.code-workspace
+# NetBeans
+nbproject/private/
+build/
+nbbuild/
+dist/
+nbdist/
+.nb-gradle/
+
+# ---------- 3. 运行时 / 日志 / 临时文件 ----------
+*.log
+logs/
+*.pid
+*.seed
+*.pid.lock
+tmp/
+temp/
+tmp_*/
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+
+# ---------- 4. 系统文件（Windows / macOS） ----------
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+
+# ---------- 5. 敏感 & 本地覆盖配置 ----------
+# 本地配置（放你的 API Key，不要提交）
+application-local.yml
+application-local.properties
+.env
+.env.*
+# 密钥 / 证书
+*.pem
+*.key
+*.p12
+*.jks
+*.keystore
+*.truststore
+# Maven settings 本地覆盖
+settings.xml
+
+# ---------- 6. 调试 / Profiler ----------
+*.hprof
+*.jfr
+heapdump*.hprof
+java_pid*.hprof

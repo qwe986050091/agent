@@ -7,3 +7,4 @@ com\example\agent\controller\AgentController$ChatRequest.class
 com\example\agent\controller\AgentController.class
 com\example\agent\controller\AgentController$ChatResponse.class
 com\example\agent\tools\DateTimeTools$1.class
+com\example\agent\controller\AgentController$ErrorResponse.class
