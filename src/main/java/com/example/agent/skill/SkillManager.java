@@ -1,5 +1,7 @@
 package com.example.agent.skill;
 
+import com.example.agent.tools.ToolRegistry;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,9 +38,12 @@ public class SkillManager {
      * （这就是"自动注入" → 未来改成 HTTP/RPC 获取用户挂载 Skill 的替换点）
      */
     private final List<Skill> initialSkills;
+    private final ToolRegistry toolRegistry;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public SkillManager(List<Skill> initialSkills) {
+    public SkillManager(List<Skill> initialSkills, ToolRegistry toolRegistry) {
         this.initialSkills = initialSkills;
+        this.toolRegistry = toolRegistry;
     }
 
     @PostConstruct
@@ -56,6 +61,39 @@ public class SkillManager {
     public void register(Skill skill) {
         skillRegistry.put(skill.name(), skill);
         log.info("[SkillManager] 注册 Skill: {}", skill.name());
+    }
+
+    /**
+     * 从 JSON 配置注册一个 Skill（用户在线上传 Skill 的核心入口）
+     *
+     * JSON 格式参见 {@link SkillDefinition}
+     * 流程：解析 JSON → 从 ToolRegistry 按 toolNames 获取 Tool 实例 → 包装成 ConfigurableSkill → 注册
+     */
+    public Skill registerFromJson(String json) throws Exception {
+        SkillDefinition def = objectMapper.readValue(json, SkillDefinition.class);
+
+        // 校验必填字段
+        if (def.getName() == null || def.getName().isBlank()) {
+            throw new IllegalArgumentException("Skill 名称不能为空");
+        }
+
+        // 按 toolNames 从 ToolRegistry 获取 Tool 实例
+        List<Object> skillTools = new ArrayList<>();
+        if (def.getToolNames() != null) {
+            for (String toolName : def.getToolNames()) {
+                Object tool = toolRegistry.getTool(toolName);
+                if (tool == null) {
+                    throw new IllegalArgumentException(
+                            "Tool 不存在: " + toolName + "，可用 Tool: " + toolRegistry.getAllToolNames());
+                }
+                skillTools.add(tool);
+            }
+        }
+
+        ConfigurableSkill skill = new ConfigurableSkill(def, skillTools);
+        register(skill);
+        log.info("[SkillManager] 从 JSON 注册 Skill: {}，包含 {} 个 Tool", skill.name(), skillTools.size());
+        return skill;
     }
 
     /** 注销一个 Skill */

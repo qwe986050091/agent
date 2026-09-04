@@ -40,6 +40,16 @@ public class CalculatorSkill implements Skill {
     }
 
     @Override
+    public String systemPrompt() {
+        return """
+                【计算技能】
+                对于数学计算类问题（加减乘除、幂运算等），必须调用计算器工具，不能心算或猜测。
+                可用工具：add(a,b)、subtract(a,b)、multiply(a,b)、divide(a,b)、power(base,exponent)。
+                对于复杂表达式，可以分步调用多个工具完成计算。
+                """;
+    }
+
+    @Override
     public List<Object> tools() {
         return List.of(calculatorTools);
     }

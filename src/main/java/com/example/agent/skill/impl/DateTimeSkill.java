@@ -39,6 +39,15 @@ public class DateTimeSkill implements Skill {
     }
 
     @Override
+    public String systemPrompt() {
+        return """
+                【日期时间技能】
+                对于日期/时间/星期类问题，必须调用日期时间工具获取准确信息，不能编造。
+                可用工具：getCurrentDate()、getCurrentTime()、getCurrentDateTime()、getDayOfWeek()。
+                """;
+    }
+
+    @Override
     public List<Object> tools() {
         return List.of(dateTimeTools);
     }

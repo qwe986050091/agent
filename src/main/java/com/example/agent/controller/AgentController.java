@@ -116,6 +116,38 @@ public class AgentController {
                 .body(new ErrorResponse("NOT_MOUNTED", "用户未挂载该 Skill: " + request.getSkillName()));
     }
 
+    /**
+     * 用户上传 Skill（JSON 配置）—— 动态新增能力的核心入口
+     *
+     * 请求体示例：
+     * {
+     *   "name": "weather_time_report",
+     *   "shortDescription": "生成天气时间报告",
+     *   "detailedDescription": "查询天气和时间，生成一份报告",
+     *   "systemPrompt": "当用户要求生成天气时间报告时，必须：1.调用 getWeather 2.调用 getCurrentTime 3.生成文档",
+     *   "toolNames": ["calculatorTools", "dateTimeTools"]
+     * }
+     */
+    @PostMapping("/skills/upload")
+    public ResponseEntity<?> uploadSkill(@RequestBody String json) {
+        if (json == null || json.trim().isEmpty()) {
+            return ResponseEntity.badRequest()
+                    .body(new ErrorResponse("BAD_REQUEST", "请求体 JSON 不能为空"));
+        }
+        try {
+            Skill skill = skillManager.registerFromJson(json);
+            return ResponseEntity.ok(new ErrorResponse("OK",
+                    "Skill 上传成功: " + skill.name() +
+                            "，包含 " + skill.tools().size() + " 个 Tool"));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest()
+                    .body(new ErrorResponse("INVALID_SKILL", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(new ErrorResponse("UPLOAD_FAILED", "Skill 上传失败: " + e.getMessage()));
+        }
+    }
+
     // ==================== 入参校验 ====================
 
     private ResponseEntity<?> requireMessage(String message) {
