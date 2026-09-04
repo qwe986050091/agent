@@ -1,0 +1,30 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: simple-agent
+
+# ===== LangChain4j 配置 =====
+# 支持 OpenAI、Azure OpenAI、以及任意 OpenAI 兼容接口（如 DeepSeek、通义千问、Kimi、Ollama 等）
+# 只需修改 base-url / api-key / model-name 三项即可切换
+langchain4j:
+  open-ai:
+    chat-model:
+      # API Key：从环境变量读取，避免明文写死
+      # Windows PowerShell 设置: $env:OPENAI_API_KEY="sk-xxx"
+      api-key: ${OPENAI_API_KEY:}
+      # Base URL：默认官方 OpenAI，替换为兼容接口时改这里
+      # DeepSeek: https://api.deepseek.com/v1
+      # 通义千问兼容: https://dashscope.aliyuncs.com/compatible-mode/v1
+      # Ollama: http://localhost:11434/v1
+      base-url: ${OPENAI_BASE_URL:https://api.deepseek.com}
+      # 模型名
+      model-name: ${OPENAI_MODEL:deepseek-v4-flash}
+      # 生成参数
+      temperature: 0.7
+      top-p: 0.9
+      timeout: 60s
+      # 开启工具调用（LangChain4j 会自动执行 @Tool 方法）
+      log-requests: true
+      log-responses: true
