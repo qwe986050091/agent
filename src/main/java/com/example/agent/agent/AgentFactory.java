@@ -3,7 +3,6 @@ package com.example.agent.agent;
 import com.example.agent.skill.Skill;
 import com.example.agent.skill.SkillManager;
 import dev.langchain4j.memory.ChatMemory;
-import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.service.AiServices;
@@ -53,6 +52,11 @@ public class AgentFactory {
 
     /** 全局共享的对话记忆存储（按 userId 隔离） */
     private final Map<String, ChatMemory> memoryStore = new ConcurrentHashMap<>();
+
+    /** 会话总结记忆参数：消息超过该条数即触发一次语义压缩 */
+    private static final int MEMORY_MAX_MESSAGES = 40;
+    /** 压缩后保留的最近对话条数 */
+    private static final int MEMORY_KEEP_RECENT = 20;
 
     public AgentFactory(ChatModel chatModel, StreamingChatModel streamingChatModel, SkillManager skillManager) {
         this.chatModel = chatModel;
@@ -134,12 +138,12 @@ public class AgentFactory {
         return allTools.isEmpty() ? new Object[0] : allTools.toArray();
     }
 
-    /** 按 memoryId（userId）获取/创建对话记忆 */
+    /** 按 memoryId（userId）获取/创建对话记忆（带会话总结，超长对话自动压缩为摘要） */
     private ChatMemory memoryOf(Object memoryIdObj) {
         String memoryId = memoryIdObj == null ? "default" : memoryIdObj.toString();
         return memoryStore.computeIfAbsent(
                 memoryId,
-                id -> MessageWindowChatMemory.withMaxMessages(20)
+                id -> new SummarizingChatMemory(id, chatModel, MEMORY_MAX_MESSAGES, MEMORY_KEEP_RECENT)
         );
     }
 
