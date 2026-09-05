@@ -3,6 +3,7 @@ package com.example.agent.controller;
 import com.example.agent.agent.AgentFactory;
 import com.example.agent.skill.Skill;
 import com.example.agent.skill.SkillManager;
+import com.example.agent.tools.ToolRegistry;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -19,10 +20,12 @@ import java.util.stream.Collectors;
  *   GET  /api/agent/health            健康检查
  *   GET  /api/agent/chat              对话（GET）
  *   POST /api/agent/chat              对话（POST）
+ *   GET  /api/agent/tools             列出平台内置可用 Tool 名称
  *   GET  /api/agent/skills            列出平台所有可用 Skill
  *   GET  /api/agent/skills/mounted    列出某用户已挂载的 Skill
  *   POST /api/agent/skills/mount      用户挂载 Skill
  *   POST /api/agent/skills/unmount    用户卸载 Skill
+ *   POST /api/agent/skills/unregister 注销一个 Skill（业务后端删除时调用）
  */
 @RestController
 @RequestMapping("/api/agent")
@@ -30,10 +33,12 @@ public class AgentController {
 
     private final AgentFactory agentFactory;
     private final SkillManager skillManager;
+    private final ToolRegistry toolRegistry;
 
-    public AgentController(AgentFactory agentFactory, SkillManager skillManager) {
+    public AgentController(AgentFactory agentFactory, SkillManager skillManager, ToolRegistry toolRegistry) {
         this.agentFactory = agentFactory;
         this.skillManager = skillManager;
+        this.toolRegistry = toolRegistry;
     }
 
     // ==================== 对话接口 ====================
@@ -66,6 +71,12 @@ public class AgentController {
     }
 
     // ==================== Skill 管理接口 ====================
+
+    /** 列出平台内置可用的 Tool 名称（供业务后端/前端上传 Skill 时选择） */
+    @GetMapping("/tools")
+    public ResponseEntity<?> listTools() {
+        return ResponseEntity.ok(java.util.Map.of("tools", toolRegistry.getAllToolNames()));
+    }
 
     /** 列出平台所有可用 Skill */
     @GetMapping("/skills")
