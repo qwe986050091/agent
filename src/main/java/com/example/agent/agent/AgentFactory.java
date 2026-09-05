@@ -5,7 +5,9 @@ import com.example.agent.skill.SkillManager;
 import dev.langchain4j.memory.ChatMemory;
 import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.service.AiServices;
+import dev.langchain4j.service.TokenStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -14,6 +16,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 /**
@@ -45,23 +48,73 @@ public class AgentFactory {
             """;
 
     private final ChatModel chatModel;
+    private final StreamingChatModel streamingChatModel;
     private final SkillManager skillManager;
 
     /** 全局共享的对话记忆存储（按 userId 隔离） */
     private final Map<String, ChatMemory> memoryStore = new ConcurrentHashMap<>();
 
-    public AgentFactory(ChatModel chatModel, SkillManager skillManager) {
+    public AgentFactory(ChatModel chatModel, StreamingChatModel streamingChatModel, SkillManager skillManager) {
         this.chatModel = chatModel;
+        this.streamingChatModel = streamingChatModel;
         this.skillManager = skillManager;
     }
 
     /**
-     * 处理用户对话请求
+     * 处理用户对话请求（同步，完整返回回复）
      */
     public String chat(String userId, String message) {
-        // 1. 获取用户已挂载的 Skills
-        List<Skill> mountedSkills = skillManager.getMountedSkills(userId);
+        List<Skill> mountedSkills = prepare(userId);
 
+        SimpleAgent agent = AiServices.builder(SimpleAgent.class)
+                .chatModel(chatModel)
+                .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
+                .tools(toolsOf(mountedSkills))
+                .chatMemoryProvider(this::memoryOf)
+                .build();
+
+        return agent.chat(userId, message);
+    }
+
+    /**
+     * 处理用户对话请求（流式），返回已装配回调的 TokenStream。
+     *
+     * 注意：TokenStream.start() 是阻塞执行，调用方需在独立线程中调用：
+     * <pre>
+     *   executor.execute(() -> agentFactory.streamChat(...).start());
+     * </pre>
+     *
+     * @param onToken    每收到一个 token 片段回调
+     * @param onComplete 完整回复回调（最终文本，含工具调用后的最终答案）
+     * @param onError    异常回调
+     */
+    public TokenStream streamChat(String userId, String message,
+                                  Consumer<String> onToken,
+                                  Consumer<String> onComplete,
+                                  Consumer<Throwable> onError) {
+        List<Skill> mountedSkills = prepare(userId);
+
+        StreamingSimpleAgent agent = AiServices.builder(StreamingSimpleAgent.class)
+                .streamingChatModel(streamingChatModel)
+                .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
+                .tools(toolsOf(mountedSkills))
+                .chatMemoryProvider(this::memoryOf)
+                .build();
+
+        return agent.chat(userId, message)
+                .onPartialResponse(onToken)
+                .onCompleteResponse(response -> {
+                    String text = response.aiMessage().text();
+                    onComplete.accept(text == null ? "" : text);
+                })
+                .onError(onError);
+    }
+
+    /**
+     * 请求前置准备：获取用户已挂载 Skills 并打印日志
+     */
+    private List<Skill> prepare(String userId) {
+        List<Skill> mountedSkills = skillManager.getMountedSkills(userId);
         if (mountedSkills.isEmpty()) {
             log.info("[AgentFactory] 用户 {} 未挂载任何 Skill，将以纯对话模式响应（无工具）", userId);
         } else {
@@ -69,32 +122,25 @@ public class AgentFactory {
                     userId, mountedSkills.size(),
                     mountedSkills.stream().map(Skill::name).toList());
         }
+        return mountedSkills;
+    }
 
-        // 2. 拼接动态 System Message = 默认人设 + 所有 Skill 的 systemPrompt
-        String systemMessage = buildSystemMessage(mountedSkills);
-
-        // 3. 从 Skills 提取所有 Tools
+    /** 从 Skills 提取所有 Tools */
+    private Object[] toolsOf(List<Skill> mountedSkills) {
         List<Object> allTools = new ArrayList<>();
         for (Skill skill : mountedSkills) {
             allTools.addAll(skill.tools());
         }
+        return allTools.isEmpty() ? new Object[0] : allTools.toArray();
+    }
 
-        // 4. 动态构建 AiServices（注入动态 System Message + 用户专属的 Tools）
-        SimpleAgent agent = AiServices.builder(SimpleAgent.class)
-                .chatModel(chatModel)
-                .systemMessageProvider(memoryId -> systemMessage)  // ★ 动态注入 System Message
-                .tools(allTools.isEmpty() ? new Object[0] : allTools.toArray())
-                .chatMemoryProvider(memoryIdObj -> {
-                    String memoryId = memoryIdObj == null ? "default" : memoryIdObj.toString();
-                    return memoryStore.computeIfAbsent(
-                            memoryId,
-                            id -> MessageWindowChatMemory.withMaxMessages(20)
-                    );
-                })
-                .build();
-
-        // 5. 调用
-        return agent.chat(userId, message);
+    /** 按 memoryId（userId）获取/创建对话记忆 */
+    private ChatMemory memoryOf(Object memoryIdObj) {
+        String memoryId = memoryIdObj == null ? "default" : memoryIdObj.toString();
+        return memoryStore.computeIfAbsent(
+                memoryId,
+                id -> MessageWindowChatMemory.withMaxMessages(20)
+        );
     }
 
     /**

@@ -4,13 +4,20 @@ import com.example.agent.agent.AgentFactory;
 import com.example.agent.skill.Skill;
 import com.example.agent.skill.SkillManager;
 import com.example.agent.tools.ToolRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 /**
@@ -30,6 +37,15 @@ import java.util.stream.Collectors;
 @RestController
 @RequestMapping("/api/agent")
 public class AgentController {
+
+    private static final Logger log = LoggerFactory.getLogger(AgentController.class);
+
+    /** SSE 流式对话的工作线程池（TokenStream.start() 为阻塞调用） */
+    private final ExecutorService streamExecutor = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "agent-sse-stream");
+        t.setDaemon(true);
+        return t;
+    });
 
     private final AgentFactory agentFactory;
     private final SkillManager skillManager;
@@ -63,6 +79,64 @@ public class AgentController {
         if (bad != null) return bad;
         String answer = agentFactory.chat(uid, msg);
         return ResponseEntity.ok(new ChatResponse(uid, msg, answer));
+    }
+
+    /**
+     * 流式对话（SSE）：逐 token 推送
+     *
+     * 事件格式（标准 text/event-stream）：
+     *   data: 你好          ← 每个 token 一个事件
+     *   data: [DONE]        ← 结束标记
+     */
+    @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Object chatStream(@RequestBody(required = false) ChatRequest request) {
+        if (request == null) {
+            return ResponseEntity.badRequest().body(new ErrorResponse("BAD_REQUEST", "请求体为空"));
+        }
+        String uid = request.getUserId() == null ? "default" : request.getUserId();
+        String msg = request.getMessage();
+        if (msg == null || msg.trim().isEmpty()) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(new ErrorResponse("EMPTY_MESSAGE", "参数 message 不能为空或纯空白字符"));
+        }
+
+        // 0 表示不超时（流式生成可能较久）；实际由容器兜底
+        SseEmitter emitter = new SseEmitter(0L);
+
+        streamExecutor.execute(() -> {
+            try {
+                agentFactory.streamChat(
+                        uid, msg,
+                        // 每个 token 片段
+                        token -> {
+                            try {
+                                emitter.send(SseEmitter.event().data(token));
+                            } catch (IOException e) {
+                                throw new RuntimeException("SSE 发送失败，客户端可能已断开", e);
+                            }
+                        },
+                        // 完整回复（工具调用循环结束后的最终答案）
+                        fullAnswer -> {
+                            try {
+                                emitter.send(SseEmitter.event().data("[DONE]"));
+                                emitter.complete();
+                            } catch (IOException e) {
+                                emitter.completeWithError(e);
+                            }
+                        },
+                        // 异常
+                        error -> {
+                            log.error("[chatStream] 流式对话出错: {}", error.getMessage());
+                            emitter.completeWithError(error);
+                        }
+                ).start();
+            } catch (Exception e) {
+                log.error("[chatStream] 流式对话启动失败", e);
+                emitter.completeWithError(e);
+            }
+        });
+
+        return emitter;
     }
 
     @GetMapping("/health")

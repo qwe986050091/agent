@@ -2,7 +2,9 @@ package com.example.agent.config;
 
 import com.example.agent.observability.ReActLoggerListener;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
+import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -57,8 +59,25 @@ public class AgentConfig {
                 .timeout(timeout)
                 .logRequests(logRequests)
                 .logResponses(logResponses)
-                // 注册 ReAct 日志监听器：控制台打印每一轮 LLM 请求/响应、工具调用
+                // ReAct 日志监听器：控制台打印每一轮 LLM 请求/响应、工具调用
                 .listeners(new ReActLoggerListener())
+                .build();
+    }
+
+    /**
+     * 流式 ChatModel：SSE 逐 token 输出使用，所有用户共享（无状态）
+     */
+    @Bean
+    public StreamingChatModel streamingChatModel() {
+        return OpenAiStreamingChatModel.builder()
+                .apiKey(apiKey)
+                .baseUrl(baseUrl)
+                .modelName(modelName)
+                .temperature(temperature)
+                .topP(topP)
+                .timeout(timeout)
+                .logRequests(logRequests)
+                .logResponses(logResponses)
                 .build();
     }
 }
