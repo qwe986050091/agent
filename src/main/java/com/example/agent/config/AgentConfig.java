@@ -45,11 +45,26 @@ public class AgentConfig {
     private boolean logResponses;
 
     /**
+     * 启动 fail-fast：API Key 必须由环境变量 OPENAI_API_KEY 注入。
+     * 缺失时直接终止启动，避免拖到首次对话才以 401/模糊错误暴露。
+     */
+    private void requireApiKey() {
+        if (apiKey == null || apiKey.isBlank()) {
+            throw new IllegalStateException("""
+                    未配置 LLM API Key：请通过环境变量 OPENAI_API_KEY 注入后再启动。
+                    - 生产：在 systemd unit 中配置 Environment=OPENAI_API_KEY=sk-...
+                    - 本地：PowerShell 执行 $env:OPENAI_API_KEY="sk-..."，或在 IDE 运行配置中添加环境变量
+                    application.yml 中不再保留任何明文密钥默认值。""");
+        }
+    }
+
+    /**
      * 用 OpenAiChatModel.builder() 手动构造 ChatModel（LangChain4j 1.x 新接口名）
      * 所有用户共享同一个 ChatModel 实例（无状态）
      */
     @Bean
     public ChatModel chatModel() {
+        requireApiKey();
         return OpenAiChatModel.builder()
                 .apiKey(apiKey)
                 .baseUrl(baseUrl)
@@ -69,6 +84,7 @@ public class AgentConfig {
      */
     @Bean
     public StreamingChatModel streamingChatModel() {
+        requireApiKey();
         return OpenAiStreamingChatModel.builder()
                 .apiKey(apiKey)
                 .baseUrl(baseUrl)

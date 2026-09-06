@@ -5,16 +5,25 @@ spring:
   application:
     name: simple-agent
 
+# ===== 服务间鉴权 =====
+# backend 调用 agent 时必须携带请求头 X-Agent-Token，值与此处一致
+# 生产环境通过环境变量 AGENT_INTERNAL_TOKEN 注入强随机值（systemd Environment）；
+# 下方默认值仅供本地开发，未配置时除 /health 外所有接口拒绝访问
+agent:
+  internal-token: ${AGENT_INTERNAL_TOKEN:dev-internal-token}
+
 # ===== LangChain4j 配置 =====
 # 支持 OpenAI、Azure OpenAI、以及任意 OpenAI 兼容接口（如 DeepSeek、通义千问、Kimi、Ollama 等）
 # 只需修改 base-url / api-key / model-name 三项即可切换
 langchain4j:
   open-ai:
     chat-model:
-      # API Key：从环境变量读取，避免明文写死
-      # Windows PowerShell 设置: $env:OPENAI_API_KEY="sk-xxx"
+      # API Key：必须由环境变量 OPENAI_API_KEY 注入，代码/配置中不保留任何明文默认值
+      # 生产：systemd unit 的 Environment=OPENAI_API_KEY=... 注入
+      # 本地：Windows PowerShell $env:OPENAI_API_KEY="sk-xxx"，或 IDE 运行配置的 Environment Variables
+      # 未配置时启动即失败（AgentConfig fail-fast），不会拖到首次对话才报错
       api-key: ${OPENAI_API_KEY:}
-      # Base URL：默认官方 OpenAI，替换为兼容接口时改这里
+      # Base URL：默认官方 OpenAI，替换为兼容接口时改这里（非敏感，可保留默认）
       # DeepSeek: https://api.deepseek.com/v1
       # 通义千问兼容: https://dashscope.aliyuncs.com/compatible-mode/v1
       # Ollama: http://localhost:11434/v1

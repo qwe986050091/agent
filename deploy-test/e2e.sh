@@ -41,7 +41,7 @@ curl -s -N -X POST $B/api/chat/stream -H "Authorization: Bearer $TOKEN" -H 'Cont
 echo; echo
 
 echo "===== 7. 数据库落库验证 ====="
-mysql -uroot -p agent_chat -e \
+mysql -uroot -p"${MYSQL_PW:?请先 export MYSQL_PW=数据库密码}" agent_chat -e \
   "select user_id, count(*) as msg_count from chat_message where user_id='$U' group by user_id; select user_id, skill_name from user_skill where user_id='$U'; select user_id, left(summary,60) as summary_preview, updated_at from agent_memory where user_id='$U';" \
   2>/dev/null
 
@@ -49,6 +49,6 @@ echo; echo "===== 8. agent 侧 ReAct 日志（应看到计算器工具调用 + �
 journalctl -u agent --since '3 minutes ago' --no-pager | grep -E 'AgentFactory|Action|Final Answer' | tail -8
 
 echo; echo "===== 9. 清理测试数据 ====="
-mysql -uroot -p agent_chat -e \
+mysql -uroot -p"${MYSQL_PW:?请先 export MYSQL_PW=数据库密码}" agent_chat -e \
   "delete from app_user where username='$U'; delete from chat_message where user_id='$U'; delete from user_skill where user_id='$U'; delete from agent_memory where user_id='$U';" 2>/dev/null
 echo "测试用户 $U 数据已清理"
