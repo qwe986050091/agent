@@ -33,6 +33,8 @@ langchain4j:
 # 使用本地进程内 Embedding 模型（bge-small-zh-v1.5 量化版，ONNX），无需外部 API Key
 rag:
   enabled: true              # 置 false 可完全关闭 RAG（对话不受影响）
+  # 向量库快照文件（相对服务 WorkingDirectory；启动自动加载，写入后防抖异步落盘，重启不丢索引）
+  store-file: data/rag-embeddings.json
   chunk-size: 500            # 文档切块：每段最大字符数（中文按字符计）
   chunk-overlap: 50          # 相邻块重叠字符数，避免语义被切断
   search:

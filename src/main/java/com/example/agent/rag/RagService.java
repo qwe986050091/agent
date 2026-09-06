@@ -16,12 +16,20 @@ import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
 import dev.langchain4j.store.embedding.EmbeddingSearchResult;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import dev.langchain4j.store.embedding.filter.MetadataFilterBuilder;
+import dev.langchain4j.store.embedding.inmemory.InMemoryEmbeddingStore;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * RAG 检索增强服务。
@@ -34,6 +42,7 @@ import java.util.List;
  * 特点：
  *  - Embedding 使用进程内 ONNX 模型（bge-small-zh-v1.5 量化版），零外部 API
  *  - 模型懒加载：首次索引/检索时才初始化，不拖慢启动
+ *  - 向量库快照落盘：每次写入后防抖异步序列化到 JSON 文件，启动时自动加载，重启不丢索引
  *  - 优雅降级：模型加载或向量化失败时 RAG 自动关闭，不影响正常聊天
  */
 @Service
@@ -52,6 +61,8 @@ public class RagService {
     public static final String META_DOC_ID = "docId";
 
     private final EmbeddingStore<TextSegment> embeddingStore;
+    /** 向量快照文件路径（null 表示不落盘） */
+    private final Path storeFile;
     private final int chunkSize;
     private final int chunkOverlap;
     private final int maxResults;
@@ -62,10 +73,22 @@ public class RagService {
     /** 模型加载失败后置 true，RAG 永久降级为关闭（直到重启） */
     private volatile boolean unavailable = false;
 
+    /** 快照落盘单线程（守护线程，不阻塞 JVM 退出） */
+    private final ExecutorService snapshotExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "rag-snapshot-writer");
+        t.setDaemon(true);
+        return t;
+    });
+    private final Object snapshotLock = new Object();
+    /** 是否已有一次落盘任务在排队（防抖：合并连续写入） */
+    private boolean snapshotScheduled = false;
+
     public RagService(EmbeddingStore<TextSegment> embeddingStore,
+                      Path storeFile,
                       int chunkSize, int chunkOverlap,
                       int maxResults, double minScore) {
         this.embeddingStore = embeddingStore;
+        this.storeFile = storeFile;
         this.chunkSize = chunkSize;
         this.chunkOverlap = chunkOverlap;
         this.maxResults = maxResults;
@@ -99,7 +122,21 @@ public class RagService {
         }
         embedAndStore(model, segments);
         log.info("[RAG] 用户 {} 文档《{}》索引完成，共 {} 个片段", userId, sourceName, segments.size());
+        scheduleSnapshot();
         return segments.size();
+    }
+
+    /**
+     * 删除某文档的全部向量片段（删除知识库文档时调用）。
+     * docId 为上传时生成的全局唯一 ID，按 metadata 精确匹配。
+     */
+    public void removeDocument(String docId) {
+        if (docId == null || docId.isBlank()) {
+            return;
+        }
+        embeddingStore.removeAll(MetadataFilterBuilder.metadataKey(META_DOC_ID).isEqualTo(docId));
+        log.info("[RAG] 文档 {} 的向量片段已删除", docId);
+        scheduleSnapshot();
     }
 
     /**
@@ -119,6 +156,7 @@ public class RagService {
                 .put(META_SOURCE, "历史对话");
         List<TextSegment> segments = List.of(TextSegment.from(text, metadata));
         embedAndStore(model, segments);
+        scheduleSnapshot();
     }
 
     /**
@@ -206,5 +244,72 @@ public class RagService {
             log.warn("[RAG] 向量化/入库失败: {}", e.getMessage());
             throw e;
         }
+    }
+
+    // ==================== 向量快照持久化 ====================
+
+    /**
+     * 写入向量库后防抖异步落盘：1.5s 内的多次写入合并为一次快照，
+     * 避免连续对话时每条消息都全量序列化。
+     */
+    private void scheduleSnapshot() {
+        if (storeFile == null) {
+            return;
+        }
+        synchronized (snapshotLock) {
+            if (snapshotScheduled) {
+                return;
+            }
+            snapshotScheduled = true;
+        }
+        snapshotExecutor.submit(() -> {
+            try {
+                Thread.sleep(1500L);
+                writeSnapshot();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                log.warn("[RAG] 向量快照落盘失败: {}", e.getMessage());
+            } finally {
+                synchronized (snapshotLock) {
+                    snapshotScheduled = false;
+                }
+            }
+        });
+    }
+
+    /**
+     * 全量序列化向量库到 JSON 文件：先写 .tmp 再原子替换，
+     * 避免写到一半进程退出导致快照损坏。
+     */
+    private void writeSnapshot() {
+        if (!(embeddingStore instanceof InMemoryEmbeddingStore<?>) || storeFile == null) {
+            return;
+        }
+        try {
+            Path parent = storeFile.toAbsolutePath().getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            Path tmp = storeFile.resolveSibling(storeFile.getFileName() + ".tmp");
+            ((InMemoryEmbeddingStore<TextSegment>) embeddingStore).serializeToFile(tmp);
+            try {
+                Files.move(tmp, storeFile,
+                        StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                // 个别文件系统不支持原子移动，退化为普通替换
+                Files.move(tmp, storeFile, StandardCopyOption.REPLACE_EXISTING);
+            }
+            log.debug("[RAG] 向量快照已落盘: {}", storeFile);
+        } catch (Exception e) {
+            log.warn("[RAG] 向量快照落盘失败: {}", e.getMessage());
+        }
+    }
+
+    /** 停机前同步刷一次盘，尽量不丢最后未落盘的写入 */
+    @PreDestroy
+    public void shutdown() {
+        writeSnapshot();
+        snapshotExecutor.shutdown();
     }
 }

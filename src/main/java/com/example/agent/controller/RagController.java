@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.*;
  * 接口一览：
  *   POST /api/agent/rag/index-document      索引一篇文档（切块 + 向量化）
  *   POST /api/agent/rag/index-conversation  索引一条对话消息（长期记忆）
+ *   POST /api/agent/rag/remove-document     删除某文档的全部向量片段
  *
  * 检索不提供独立接口：检索在对话时由 AgentFactory 通过 ContentRetriever 自动完成。
  */
@@ -70,7 +71,30 @@ public class RagController {
         }
     }
 
+    /** 删除文档向量：body {docId} */
+    @PostMapping("/remove-document")
+    public ResponseEntity<?> removeDocument(@RequestBody RemoveDocumentRequest request) {
+        if (request == null || request.getDocId() == null || request.getDocId().isBlank()) {
+            return ResponseEntity.badRequest()
+                    .body(new ErrorResponse("BAD_REQUEST", "docId 不能为空"));
+        }
+        try {
+            ragService.removeDocument(request.getDocId());
+            return ResponseEntity.ok(new ErrorResponse("OK", "文档向量已删除"));
+        } catch (Exception e) {
+            log.error("[RAG] 文档向量删除失败", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(new ErrorResponse("REMOVE_FAILED", "文档向量删除失败: " + e.getMessage()));
+        }
+    }
+
     // ==================== DTO ====================
+
+    public static class RemoveDocumentRequest {
+        private String docId;
+        public String getDocId() { return docId; }
+        public void setDocId(String docId) { this.docId = docId; }
+    }
 
     public static class IndexDocumentRequest {
         private String userId;
