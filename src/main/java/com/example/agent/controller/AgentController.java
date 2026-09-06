@@ -4,6 +4,7 @@ import com.example.agent.agent.AgentFactory;
 import com.example.agent.agent.SummarizingChatMemory;
 import com.example.agent.skill.SkillDefinition;
 import com.example.agent.tools.ToolRegistry;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -15,8 +16,12 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Agent REST API（无状态版：每次请求自带记忆状态与技能定义）
@@ -38,12 +43,29 @@ public class AgentController {
 
     private static final Logger log = LoggerFactory.getLogger(AgentController.class);
 
-    /** SSE 流式对话的工作线程池（TokenStream.start() 为阻塞调用） */
-    private final ExecutorService streamExecutor = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "agent-sse-stream");
-        t.setDaemon(true);
-        return t;
-    });
+    /** SSE 单次对话最长时间（5 分钟），超时主动结束，避免线程/连接被无限占用 */
+    private static final long SSE_TIMEOUT_MS = 5 * 60 * 1000L;
+
+    /**
+     * SSE 流式对话的工作线程池（TokenStream.start() 为阻塞调用）。
+     * 有界：core 8 / max 24 / 队列 100，满载 AbortPolicy 拒绝（返回 503，快速失败而非无限堆积）。
+     */
+    private final ThreadPoolExecutor streamExecutor = new ThreadPoolExecutor(
+            8, 24, 60L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(100),
+            r -> {
+                Thread t = new Thread(r, "agent-sse-stream-" + THREAD_SEQ.incrementAndGet());
+                t.setDaemon(true);
+                return t;
+            },
+            new ThreadPoolExecutor.AbortPolicy());
+
+    private static final AtomicInteger THREAD_SEQ = new AtomicInteger();
+
+    @PreDestroy
+    void shutdownExecutor() {
+        streamExecutor.shutdown();
+    }
 
     private final AgentFactory agentFactory;
     private final ToolRegistry toolRegistry;
@@ -111,8 +133,12 @@ public class AgentController {
                     .body(new ErrorResponse("EMPTY_MESSAGE", "参数 message 不能为空或纯空白字符"));
         }
 
-        // 0 表示不超时（流式生成可能较久）；实际由容器兜底
-        SseEmitter emitter = new SseEmitter(0L);
+        // 5 分钟超时：超长回复/僵死 LLM 调用不会无限占用线程与连接
+        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
+        emitter.onTimeout(() -> {
+            log.warn("[chatStream] SSE 超过 {}ms 未完成，主动断开", SSE_TIMEOUT_MS);
+            emitter.completeWithError(new TimeoutException("响应超时，请重试"));
+        });
 
         final AgentFactory.AgentChatRequest req;
         try {
@@ -121,7 +147,8 @@ public class AgentController {
             return ResponseEntity.badRequest().body(new ErrorResponse("SKILL_INVALID", e.getMessage()));
         }
 
-        streamExecutor.execute(() -> {
+        try {
+            streamExecutor.execute(() -> {
             try {
                 agentFactory.streamChat(
                         req,
@@ -158,6 +185,12 @@ public class AgentController {
                 emitter.completeWithError(e);
             }
         });
+        } catch (RejectedExecutionException e) {
+            // 线程池/队列已满：快速失败，不排队堆积
+            log.warn("[chatStream] 流式线程池已满，拒绝请求");
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(new ErrorResponse("SERVICE_BUSY", "当前对话繁忙，请稍后重试"));
+        }
 
         return emitter;
     }
