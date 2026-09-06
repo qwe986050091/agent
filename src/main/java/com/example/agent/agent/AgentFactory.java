@@ -2,8 +2,8 @@ package com.example.agent.agent;
 
 import com.example.agent.rag.RagService;
 import com.example.agent.skill.Skill;
+import com.example.agent.skill.SkillDefinition;
 import com.example.agent.skill.SkillManager;
-import dev.langchain4j.memory.ChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
@@ -16,22 +16,24 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
-import java.util.stream.Collectors;
 
 /**
- * Agent 工厂（动态 Skill 挂载 + 动态 System Prompt 的核心）
+ * Agent 工厂（无状态版：动态 Skill 挂载 + 动态 System Prompt + 请求级记忆）
  *
- * 每次用户请求时：
- *   1. 从 SkillManager 取出该用户已挂载的 Skills
- *   2. 拼接默认人设 + 所有 Skill 的 systemPrompt → 作为动态 System Message
+ * 每次用户请求时，由 backend（数据权威）在 payload 中下发：
+ *   1. 该用户已挂载的 Skill 定义（{@link SkillDefinition} 列表）→ 解析成本次生效的 Tools + Prompt
+ *   2. 持久化的对话摘要 + 近期历史消息 → 通过 {@link SummarizingChatMemory#restore} 重建请求级记忆
+ *
+ * 处理流程：
+ *   1. SkillManager 解析本次 Skill 列表（内置技能用代码实例，自定义技能按定义动态构建）
+ *   2. 拼接默认人设 + 所有 Skill 的 systemPrompt → 动态 System Message
  *   3. 从 Skills 中提取所有 Tools
- *   4. 动态构建 AiServices（注入动态 System Message + 用户的 Tools + 共享的 ChatModel）
- *   5. 调用 chat() 返回结果
+ *   4. 构建请求级 AiServices（System Message + Tools + 记忆 + RAG 检索器）
+ *   5. 调用 chat() 返回结果；回合结束后取出最新摘要回传 backend 落库
  *
- * 这就是"运行时按用户重新装配 Prompt + Tools"，而不是启动时一次性绑定。
+ * agent 本身不保存任何跨请求状态：重启不丢上下文，多实例部署行为一致。
  */
 @Component
 public class AgentFactory {
@@ -55,9 +57,6 @@ public class AgentFactory {
     /** RAG 服务（rag.enabled=false 或降级时可能不存在） */
     private final ObjectProvider<RagService> ragServiceProvider;
 
-    /** 全局共享的对话记忆存储（按 userId 隔离） */
-    private final Map<String, ChatMemory> memoryStore = new ConcurrentHashMap<>();
-
     /** 会话总结记忆参数：消息超过该条数即触发一次语义压缩 */
     private static final int MEMORY_MAX_MESSAGES = 40;
     /** 压缩后保留的最近对话条数 */
@@ -72,20 +71,40 @@ public class AgentFactory {
     }
 
     /**
-     * 处理用户对话请求（同步，完整返回回复）
+     * 一次对话请求的全部输入状态（由 backend 从 MySQL 组装下发）。
+     *
+     * @param summary 持久化的历史摘要纯文本（无则 null）
+     * @param history 当前消息之前的近期对话（升序）
+     * @param skills  该用户已挂载的 Skill 定义（内置技能可只填 name）
      */
-    public String chat(String userId, String message) {
-        List<Skill> mountedSkills = prepare(userId);
+    public record AgentChatRequest(String userId,
+                                   String message,
+                                   String summary,
+                                   List<SummarizingChatMemory.HistoryMessage> history,
+                                   List<SkillDefinition> skills) {
+    }
 
+    /** 同步对话结果：回复文本 + 回合后的最新摘要（供 backend 持久化） */
+    public record AgentChatResult(String answer, String summary) {
+    }
+
+    /**
+     * 处理用户对话请求（同步，完整返回回复与最新摘要）
+     */
+    public AgentChatResult chat(AgentChatRequest request) {
+        List<Skill> mountedSkills = prepare(request);
+
+        SummarizingChatMemory memory = restoreMemory(request);
         SimpleAgent agent = AiServices.builder(SimpleAgent.class)
                 .chatModel(chatModel)
                 .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
                 .tools(toolsOf(mountedSkills))
-                .chatMemoryProvider(this::memoryOf)
-                .contentRetriever(retrieverFor(userId))
+                .chatMemoryProvider(memoryId -> memory)
+                .contentRetriever(retrieverFor(request.userId()))
                 .build();
 
-        return agent.chat(userId, message);
+        String answer = agent.chat(request.userId(), request.message());
+        return new AgentChatResult(answer == null ? "" : answer, memory.summaryText());
     }
 
     /**
@@ -97,45 +116,55 @@ public class AgentFactory {
      * </pre>
      *
      * @param onToken    每收到一个 token 片段回调
-     * @param onComplete 完整回复回调（最终文本，含工具调用后的最终答案）
+     * @param onComplete 完整回复回调（参数：最终文本含工具调用后的答案、回合后最新摘要）
      * @param onError    异常回调
      */
-    public TokenStream streamChat(String userId, String message,
+    public TokenStream streamChat(AgentChatRequest request,
                                   Consumer<String> onToken,
-                                  Consumer<String> onComplete,
+                                  BiConsumer<String, String> onComplete,
                                   Consumer<Throwable> onError) {
-        List<Skill> mountedSkills = prepare(userId);
+        List<Skill> mountedSkills = prepare(request);
 
+        SummarizingChatMemory memory = restoreMemory(request);
         StreamingSimpleAgent agent = AiServices.builder(StreamingSimpleAgent.class)
                 .streamingChatModel(streamingChatModel)
                 .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
                 .tools(toolsOf(mountedSkills))
-                .chatMemoryProvider(this::memoryOf)
-                .contentRetriever(retrieverFor(userId))
+                .chatMemoryProvider(memoryId -> memory)
+                .contentRetriever(retrieverFor(request.userId()))
                 .build();
 
-        return agent.chat(userId, message)
+        return agent.chat(request.userId(), request.message())
                 .onPartialResponse(onToken)
                 .onCompleteResponse(response -> {
                     String text = response.aiMessage().text();
-                    onComplete.accept(text == null ? "" : text);
+                    String answer = text == null ? "" : text;
+                    onComplete.accept(answer, memory.summaryText());
                 })
                 .onError(onError);
     }
 
     /**
-     * 请求前置准备：获取用户已挂载 Skills 并打印日志
+     * 请求前置准备：解析本次生效的 Skills 并打印日志
      */
-    private List<Skill> prepare(String userId) {
-        List<Skill> mountedSkills = skillManager.getMountedSkills(userId);
+    private List<Skill> prepare(AgentChatRequest request) {
+        List<Skill> mountedSkills = skillManager.resolveSkills(request.skills());
         if (mountedSkills.isEmpty()) {
-            log.info("[AgentFactory] 用户 {} 未挂载任何 Skill，将以纯对话模式响应（无工具）", userId);
+            log.info("[AgentFactory] 用户 {} 未挂载任何 Skill，将以纯对话模式响应（无工具）", request.userId());
         } else {
-            log.info("[AgentFactory] 用户 {} 已挂载 {} 个 Skill: {}",
-                    userId, mountedSkills.size(),
+            log.info("[AgentFactory] 用户 {} 本次装配 {} 个 Skill: {}",
+                    request.userId(), mountedSkills.size(),
                     mountedSkills.stream().map(Skill::name).toList());
         }
         return mountedSkills;
+    }
+
+    /** 按 backend 下发的摘要 + 历史重建请求级记忆（用完即弃，不跨请求保留） */
+    private SummarizingChatMemory restoreMemory(AgentChatRequest request) {
+        return SummarizingChatMemory.restore(
+                request.userId(), chatModel,
+                MEMORY_MAX_MESSAGES, MEMORY_KEEP_RECENT,
+                request.summary(), request.history());
     }
 
     /** 从 Skills 提取所有 Tools */
@@ -145,15 +174,6 @@ public class AgentFactory {
             allTools.addAll(skill.tools());
         }
         return allTools.isEmpty() ? new Object[0] : allTools.toArray();
-    }
-
-    /** 按 memoryId（userId）获取/创建对话记忆（带会话总结，超长对话自动压缩为摘要） */
-    private ChatMemory memoryOf(Object memoryIdObj) {
-        String memoryId = memoryIdObj == null ? "default" : memoryIdObj.toString();
-        return memoryStore.computeIfAbsent(
-                memoryId,
-                id -> new SummarizingChatMemory(id, chatModel, MEMORY_MAX_MESSAGES, MEMORY_KEEP_RECENT)
-        );
     }
 
     /**

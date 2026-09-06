@@ -1,164 +1,115 @@
 package com.example.agent.skill;
 
 import com.example.agent.tools.ToolRegistry;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
- * Skill 管理器（内存版，最小可用实现）
+ * Skill 管理器（无状态版）
  *
  * 职责：
- *   1. 维护平台所有已注册的 Skill（skillName -> Skill）
- *   2. 维护用户-Skill 挂载关系（userId -> Set<skillName>）
- *   3. 提供注册/注销/挂载/卸载/查询接口
+ *   1. 持有平台<b>内置 Skill</b> 目录（Spring 注入的 Skill Bean，代码为权威，如 calculator/datetime）
+ *   2. 每次对话请求时，按 backend 传入的已挂载 Skill 定义（SkillDefinition 列表）解析出本次生效的 Skill：
+ *      - 名称命中内置 Skill → 直接使用内置实例（其 systemPrompt/tools 以代码为准）
+ *      - 其余为用户自定义 Skill → 按 toolNames 从 {@link ToolRegistry} 解析工具，构建 {@link ConfigurableSkill}
  *
- * 注意：这是内存版，重启后数据丢失。
- * 生产环境应替换为数据库存储（Skill 元数据 + 用户挂载关系表）。
+ * 无状态化说明：自定义 Skill 元数据与用户挂载关系统一由 backend 的 MySQL 为权威来源，
+ * 每次请求随对话 payload 下发；agent 不再保存任何跨请求的 Skill/挂载状态，
+ * 重启不丢失、多实例一致。
  */
 @Component
 public class SkillManager {
 
     private static final Logger log = LoggerFactory.getLogger(SkillManager.class);
 
-    /** 平台所有已注册的 Skill */
-    private final Map<String, Skill> skillRegistry = new ConcurrentHashMap<>();
+    /** 内置 Skill 目录：skillName -> Skill（启动时由 Spring 注入的 Skill Bean 填充） */
+    private final Map<String, Skill> builtinSkills = new LinkedHashMap<>();
 
-    /** 用户-Skill 挂载关系：userId -> 已挂载的 skillName 集合 */
-    private final Map<String, Set<String>> userSkillMounts = new ConcurrentHashMap<>();
-
-    /**
-     * Spring 启动时自动注入所有 Skill 实现类并注册
-     * （这就是"自动注入" → 未来改成 HTTP/RPC 获取用户挂载 Skill 的替换点）
-     */
-    private final List<Skill> initialSkills;
     private final ToolRegistry toolRegistry;
-    private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public SkillManager(List<Skill> initialSkills, ToolRegistry toolRegistry) {
-        this.initialSkills = initialSkills;
+    public SkillManager(List<Skill> builtinSkillBeans, ToolRegistry toolRegistry) {
         this.toolRegistry = toolRegistry;
+        for (Skill skill : builtinSkillBeans) {
+            builtinSkills.put(skill.name(), skill);
+        }
     }
 
     @PostConstruct
     public void init() {
-        for (Skill skill : initialSkills) {
-            register(skill);
-        }
-        log.info("[SkillManager] 启动完成，已注册 {} 个 Skill: {}",
-                skillRegistry.size(), skillRegistry.keySet());
+        log.info("[SkillManager] 启动完成，内置 Skill 目录: {}（自定义 Skill/挂载关系由 backend 每次请求下发）",
+                builtinSkills.keySet());
     }
 
-    // ==================== Skill 注册 ====================
+    // ==================== 内置 Skill 目录 ====================
 
-    /** 注册一个 Skill（用户上传/平台新增时调用） */
-    public void register(Skill skill) {
-        skillRegistry.put(skill.name(), skill);
-        log.info("[SkillManager] 注册 Skill: {}", skill.name());
+    /** 内置 Skill 名称集合 */
+    public Set<String> builtinSkillNames() {
+        return builtinSkills.keySet();
     }
+
+    /** 内置 Skill 列表（平台能力展示用） */
+    public Collection<Skill> listBuiltin() {
+        return Collections.unmodifiableCollection(builtinSkills.values());
+    }
+
+    /** 按名称获取内置 Skill */
+    public Skill getBuiltin(String skillName) {
+        return builtinSkills.get(skillName);
+    }
+
+    // ==================== 请求级 Skill 解析 ====================
 
     /**
-     * 从 JSON 配置注册一个 Skill（用户在线上传 Skill 的核心入口）
+     * 按 backend 下发的已挂载 Skill 定义，解析出本次请求生效的 Skill 列表。
      *
-     * JSON 格式参见 {@link SkillDefinition}
-     * 流程：解析 JSON → 从 ToolRegistry 按 toolNames 获取 Tool 实例 → 包装成 ConfigurableSkill → 注册
+     * @param definitions backend 持久化的 Skill 定义（内置技能可只填 name；自定义技能需完整字段）
+     * @return 本次装配给 Agent 的 Skill（顺序与入参一致，去重）
+     * @throws IllegalArgumentException 自定义 Skill 引用了不存在的 Tool 名称时抛出（数据不一致需暴露）
      */
-    public Skill registerFromJson(String json) throws Exception {
-        SkillDefinition def = objectMapper.readValue(json, SkillDefinition.class);
-
-        // 校验必填字段
-        if (def.getName() == null || def.getName().isBlank()) {
-            throw new IllegalArgumentException("Skill 名称不能为空");
+    public List<Skill> resolveSkills(List<SkillDefinition> definitions) {
+        List<Skill> result = new ArrayList<>();
+        if (definitions == null) {
+            return result;
         }
+        for (SkillDefinition def : definitions) {
+            if (def == null || def.getName() == null || def.getName().isBlank()) {
+                continue;
+            }
+            Skill builtin = builtinSkills.get(def.getName());
+            if (builtin != null) {
+                // 内置技能：以代码中的定义为准（backend 元数据行可能只有名称）
+                result.add(builtin);
+                continue;
+            }
+            result.add(buildConfigurable(def));
+        }
+        return result;
+    }
 
-        // 按 toolNames 从 ToolRegistry 获取 Tool 实例
+    /** 从 JSON 定义构建自定义 Skill：按 toolNames 从 ToolRegistry 获取 Tool 实例 */
+    private ConfigurableSkill buildConfigurable(SkillDefinition def) {
         List<Object> skillTools = new ArrayList<>();
         if (def.getToolNames() != null) {
             for (String toolName : def.getToolNames()) {
                 Object tool = toolRegistry.getTool(toolName);
                 if (tool == null) {
                     throw new IllegalArgumentException(
-                            "Tool 不存在: " + toolName + "，可用 Tool: " + toolRegistry.getAllToolNames());
+                            "Skill「" + def.getName() + "」引用的 Tool 不存在: " + toolName
+                                    + "，可用 Tool: " + toolRegistry.getAllToolNames());
                 }
                 skillTools.add(tool);
             }
         }
-
-        ConfigurableSkill skill = new ConfigurableSkill(def, skillTools);
-        register(skill);
-        log.info("[SkillManager] 从 JSON 注册 Skill: {}，包含 {} 个 Tool", skill.name(), skillTools.size());
-        return skill;
-    }
-
-    /** 注销一个 Skill */
-    public void unregister(String skillName) {
-        skillRegistry.remove(skillName);
-        log.info("[SkillManager] 注销 Skill: {}", skillName);
-    }
-
-    /** 获取平台所有 Skill */
-    public Collection<Skill> listAll() {
-        return skillRegistry.values();
-    }
-
-    /** 按名称获取 Skill */
-    public Skill getSkill(String skillName) {
-        return skillRegistry.get(skillName);
-    }
-
-    // ==================== 用户-Skill 挂载 ====================
-
-    /** 用户挂载一个 Skill */
-    public boolean mountSkill(String userId, String skillName) {
-        if (!skillRegistry.containsKey(skillName)) {
-            log.warn("[SkillManager] 挂载失败，Skill 不存在: {}", skillName);
-            return false;
-        }
-        userSkillMounts
-                .computeIfAbsent(userId, k -> ConcurrentHashMap.newKeySet())
-                .add(skillName);
-        log.info("[SkillManager] 用户 {} 挂载 Skill: {}", userId, skillName);
-        return true;
-    }
-
-    /** 用户卸载一个 Skill */
-    public boolean unmountSkill(String userId, String skillName) {
-        Set<String> mounted = userSkillMounts.get(userId);
-        if (mounted == null || !mounted.remove(skillName)) {
-            log.warn("[SkillManager] 卸载失败，用户 {} 未挂载 Skill: {}", userId, skillName);
-            return false;
-        }
-        log.info("[SkillManager] 用户 {} 卸载 Skill: {}", userId, skillName);
-        return true;
-    }
-
-    /** 获取用户已挂载的所有 Skill */
-    public List<Skill> getMountedSkills(String userId) {
-        Set<String> mounted = userSkillMounts.get(userId);
-        if (mounted == null || mounted.isEmpty()) {
-            return Collections.emptyList();
-        }
-        return mounted.stream()
-                .map(skillRegistry::get)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
-    }
-
-    /** 获取用户已挂载的所有 Skill 名称 */
-    public Set<String> getMountedSkillNames(String userId) {
-        return userSkillMounts.getOrDefault(userId, Collections.emptySet());
-    }
-
-    /** 获取平台所有 Skill 的短描述（用于展示可选技能列表） */
-    public String allShortDescriptions() {
-        return skillRegistry.values().stream()
-                .map(s -> "- " + s.name() + ": " + s.shortDescription())
-                .collect(Collectors.joining("\n"));
+        return new ConfigurableSkill(def, skillTools);
     }
 }

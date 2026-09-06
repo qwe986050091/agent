@@ -1,8 +1,8 @@
 package com.example.agent.controller;
 
 import com.example.agent.agent.AgentFactory;
-import com.example.agent.skill.Skill;
-import com.example.agent.skill.SkillManager;
+import com.example.agent.agent.SummarizingChatMemory;
+import com.example.agent.skill.SkillDefinition;
 import com.example.agent.tools.ToolRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,26 +13,24 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
-import java.util.Collection;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.stream.Collectors;
 
 /**
- * Agent REST API
+ * Agent REST API（无状态版：每次请求自带记忆状态与技能定义）
  *
  * 接口一览：
  *   GET  /api/agent/health            健康检查
- *   GET  /api/agent/chat              对话（GET）
- *   POST /api/agent/chat              对话（POST）
+ *   GET  /api/agent/chat              对话（GET，无历史的便捷测试入口）
+ *   POST /api/agent/chat              对话（POST，body 携带 summary/history/skills）
+ *   POST /api/agent/chat/stream       流式对话（SSE）；token 事件逐片段推送，
+ *                                     结束前发 event: memory（含最新摘要），再发 data: [DONE]
  *   GET  /api/agent/tools             列出平台内置可用 Tool 名称
- *   GET  /api/agent/skills            列出平台所有可用 Skill
- *   GET  /api/agent/skills/mounted    列出某用户已挂载的 Skill
- *   POST /api/agent/skills/mount      用户挂载 Skill
- *   POST /api/agent/skills/unmount    用户卸载 Skill
- *   POST /api/agent/skills/unregister 注销一个 Skill（业务后端删除时调用）
+ *
+ * 说明：技能的上传/挂载/注销等状态管理全部由 backend（MySQL）负责，
+ * agent 不再保存技能与挂载状态，故无 /skills/upload、/skills/mount 等接口。
  */
 @RestController
 @RequestMapping("/api/agent")
@@ -48,12 +46,10 @@ public class AgentController {
     });
 
     private final AgentFactory agentFactory;
-    private final SkillManager skillManager;
     private final ToolRegistry toolRegistry;
 
-    public AgentController(AgentFactory agentFactory, SkillManager skillManager, ToolRegistry toolRegistry) {
+    public AgentController(AgentFactory agentFactory, ToolRegistry toolRegistry) {
         this.agentFactory = agentFactory;
-        this.skillManager = skillManager;
         this.toolRegistry = toolRegistry;
     }
 
@@ -64,8 +60,10 @@ public class AgentController {
                                      @RequestParam String message) {
         ResponseEntity<?> bad = requireMessage(message);
         if (bad != null) return bad;
-        String answer = agentFactory.chat(userId, message);
-        return ResponseEntity.ok(new ChatResponse(userId, message, answer));
+        // GET 便捷入口：不带历史/技能，纯无状态对话
+        AgentFactory.AgentChatRequest req =
+                new AgentFactory.AgentChatRequest(userId, message, null, List.of(), List.of());
+        return runChat(req);
     }
 
     @PostMapping("/chat")
@@ -73,29 +71,42 @@ public class AgentController {
         if (request == null) {
             return ResponseEntity.badRequest().body(new ErrorResponse("BAD_REQUEST", "请求体为空"));
         }
-        String uid = request.getUserId() == null ? "default" : request.getUserId();
-        String msg = request.getMessage();
-        ResponseEntity<?> bad = requireMessage(msg);
+        request.normalize();
+        ResponseEntity<?> bad = requireMessage(request.getMessage());
         if (bad != null) return bad;
-        String answer = agentFactory.chat(uid, msg);
-        return ResponseEntity.ok(new ChatResponse(uid, msg, answer));
+        return runChat(request.toAgentRequest());
+    }
+
+    private ResponseEntity<?> runChat(AgentFactory.AgentChatRequest req) {
+        try {
+            AgentFactory.AgentChatResult result = agentFactory.chat(req);
+            return ResponseEntity.ok(new ChatResponse(req.userId(), req.message(), result.answer(), result.summary()));
+        } catch (IllegalArgumentException e) {
+            // Skill 定义引用了不存在的 Tool 等数据不一致问题
+            return ResponseEntity.badRequest().body(new ErrorResponse("SKILL_INVALID", e.getMessage()));
+        } catch (Exception e) {
+            log.error("[chat] 对话处理失败", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(new ErrorResponse("CHAT_FAILED", "对话处理失败: " + e.getMessage()));
+        }
     }
 
     /**
      * 流式对话（SSE）：逐 token 推送
      *
      * 事件格式（标准 text/event-stream）：
-     *   data: 你好          ← 每个 token 一个事件
-     *   data: [DONE]        ← 结束标记
+     *   data: 你好                 ← 每个 token 一个事件（默认 event）
+     *   event: memory              ← 回合结束，回传最新记忆摘要（backend 落库用，不转发前端）
+     *   data: {"summary":"..."}
+     *   data: [DONE]               ← 结束标记
      */
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Object chatStream(@RequestBody(required = false) ChatRequest request) {
         if (request == null) {
             return ResponseEntity.badRequest().body(new ErrorResponse("BAD_REQUEST", "请求体为空"));
         }
-        String uid = request.getUserId() == null ? "default" : request.getUserId();
-        String msg = request.getMessage();
-        if (msg == null || msg.trim().isEmpty()) {
+        request.normalize();
+        if (request.getMessage() == null || request.getMessage().trim().isEmpty()) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(new ErrorResponse("EMPTY_MESSAGE", "参数 message 不能为空或纯空白字符"));
         }
@@ -103,10 +114,17 @@ public class AgentController {
         // 0 表示不超时（流式生成可能较久）；实际由容器兜底
         SseEmitter emitter = new SseEmitter(0L);
 
+        final AgentFactory.AgentChatRequest req;
+        try {
+            req = request.toAgentRequest();
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(new ErrorResponse("SKILL_INVALID", e.getMessage()));
+        }
+
         streamExecutor.execute(() -> {
             try {
                 agentFactory.streamChat(
-                        uid, msg,
+                        req,
                         // 每个 token 片段
                         token -> {
                             try {
@@ -115,9 +133,14 @@ public class AgentController {
                                 throw new RuntimeException("SSE 发送失败，客户端可能已断开", e);
                             }
                         },
-                        // 完整回复（工具调用循环结束后的最终答案）
-                        fullAnswer -> {
+                        // 完整回复 + 最新摘要（工具调用循环结束后的最终状态）
+                        (fullAnswer, summary) -> {
                             try {
+                                // 摘要回传事件：JSON 序列化（换行等特殊字符被转义，保证单行 data）
+                                emitter.send(SseEmitter.event()
+                                        .name("memory")
+                                        .data(Map.of("summary", summary == null ? "" : summary),
+                                                MediaType.APPLICATION_JSON));
                                 emitter.send(SseEmitter.event().data("[DONE]"));
                                 emitter.complete();
                             } catch (IOException e) {
@@ -141,96 +164,15 @@ public class AgentController {
 
     @GetMapping("/health")
     public String health() {
-        return "Simple Agent is running! Powered by LangChain4j + Spring Boot (Dynamic Skill Mode).";
+        return "Simple Agent is running! Powered by LangChain4j + Spring Boot (Stateless Mode).";
     }
 
-    // ==================== Skill 管理接口 ====================
+    // ==================== Tool 目录 ====================
 
-    /** 列出平台内置可用的 Tool 名称（供业务后端/前端上传 Skill 时选择） */
+    /** 列出平台内置可用的 Tool 名称（供 backend/前端上传 Skill 时选择） */
     @GetMapping("/tools")
     public ResponseEntity<?> listTools() {
         return ResponseEntity.ok(java.util.Map.of("tools", toolRegistry.getAllToolNames()));
-    }
-
-    /** 列出平台所有可用 Skill */
-    @GetMapping("/skills")
-    public ResponseEntity<?> listAllSkills() {
-        Collection<Skill> skills = skillManager.listAll();
-        List<SkillInfo> list = skills.stream()
-                .map(s -> new SkillInfo(s.name(), s.shortDescription(), s.detailedDescription()))
-                .collect(Collectors.toList());
-        return ResponseEntity.ok(list);
-    }
-
-    /** 列出某用户已挂载的 Skill */
-    @GetMapping("/skills/mounted")
-    public ResponseEntity<?> listMountedSkills(@RequestParam(defaultValue = "default") String userId) {
-        Set<String> mounted = skillManager.getMountedSkillNames(userId);
-        return ResponseEntity.ok(new MountedSkillsResponse(userId, mounted));
-    }
-
-    /** 用户挂载 Skill */
-    @PostMapping("/skills/mount")
-    public ResponseEntity<?> mountSkill(@RequestBody MountRequest request) {
-        if (request == null || request.getUserId() == null || request.getSkillName() == null) {
-            return ResponseEntity.badRequest()
-                    .body(new ErrorResponse("BAD_REQUEST", "userId 和 skillName 必填"));
-        }
-        boolean ok = skillManager.mountSkill(request.getUserId(), request.getSkillName());
-        if (ok) {
-            return ResponseEntity.ok(new ErrorResponse("OK",
-                    "用户 " + request.getUserId() + " 挂载 Skill " + request.getSkillName() + " 成功"));
-        }
-        return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(new ErrorResponse("SKILL_NOT_FOUND", "Skill 不存在: " + request.getSkillName()));
-    }
-
-    /** 用户卸载 Skill */
-    @PostMapping("/skills/unmount")
-    public ResponseEntity<?> unmountSkill(@RequestBody MountRequest request) {
-        if (request == null || request.getUserId() == null || request.getSkillName() == null) {
-            return ResponseEntity.badRequest()
-                    .body(new ErrorResponse("BAD_REQUEST", "userId 和 skillName 必填"));
-        }
-        boolean ok = skillManager.unmountSkill(request.getUserId(), request.getSkillName());
-        if (ok) {
-            return ResponseEntity.ok(new ErrorResponse("OK",
-                    "用户 " + request.getUserId() + " 卸载 Skill " + request.getSkillName() + " 成功"));
-        }
-        return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(new ErrorResponse("NOT_MOUNTED", "用户未挂载该 Skill: " + request.getSkillName()));
-    }
-
-    /**
-     * 用户上传 Skill（JSON 配置）—— 动态新增能力的核心入口
-     *
-     * 请求体示例：
-     * {
-     *   "name": "weather_time_report",
-     *   "shortDescription": "生成天气时间报告",
-     *   "detailedDescription": "查询天气和时间，生成一份报告",
-     *   "systemPrompt": "当用户要求生成天气时间报告时，必须：1.调用 getWeather 2.调用 getCurrentTime 3.生成文档",
-     *   "toolNames": ["calculatorTools", "dateTimeTools"]
-     * }
-     */
-    @PostMapping("/skills/upload")
-    public ResponseEntity<?> uploadSkill(@RequestBody String json) {
-        if (json == null || json.trim().isEmpty()) {
-            return ResponseEntity.badRequest()
-                    .body(new ErrorResponse("BAD_REQUEST", "请求体 JSON 不能为空"));
-        }
-        try {
-            Skill skill = skillManager.registerFromJson(json);
-            return ResponseEntity.ok(new ErrorResponse("OK",
-                    "Skill 上传成功: " + skill.name() +
-                            "，包含 " + skill.tools().size() + " 个 Tool"));
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest()
-                    .body(new ErrorResponse("INVALID_SKILL", e.getMessage()));
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(new ErrorResponse("UPLOAD_FAILED", "Skill 上传失败: " + e.getMessage()));
-        }
     }
 
     // ==================== 入参校验 ====================
@@ -248,20 +190,75 @@ public class AgentController {
     public static class ChatRequest {
         private String userId = "default";
         private String message;
+        /** 持久化的历史摘要纯文本（无则 null） */
+        private String summary;
+        /** 当前消息之前的近期对话（升序），仅取 role/content */
+        private List<HistoryMessage> history;
+        /** 该用户已挂载的 Skill 定义（内置技能可只填 name） */
+        private List<SkillDefinition> skills;
+
         public ChatRequest() {}
+
+        /** 兜底默认值，避免 NPE */
+        public void normalize() {
+            if (userId == null || userId.isBlank()) {
+                userId = "default";
+            }
+            if (history == null) {
+                history = List.of();
+            }
+            if (skills == null) {
+                skills = List.of();
+            }
+        }
+
+        public AgentFactory.AgentChatRequest toAgentRequest() {
+            List<SummarizingChatMemory.HistoryMessage> hist = history.stream()
+                    .filter(h -> h != null && h.getRole() != null && h.getContent() != null)
+                    .map(h -> new SummarizingChatMemory.HistoryMessage(h.getRole(), h.getContent()))
+                    .toList();
+            return new AgentFactory.AgentChatRequest(userId, message, summary, hist, skills);
+        }
+
         public String getUserId() { return userId; }
         public void setUserId(String userId) { this.userId = userId; }
         public String getMessage() { return message; }
         public void setMessage(String message) { this.message = message; }
+        public String getSummary() { return summary; }
+        public void setSummary(String summary) { this.summary = summary; }
+        public List<HistoryMessage> getHistory() { return history; }
+        public void setHistory(List<HistoryMessage> history) { this.history = history; }
+        public List<SkillDefinition> getSkills() { return skills; }
+        public void setSkills(List<SkillDefinition> skills) { this.skills = skills; }
+    }
+
+    public static class HistoryMessage {
+        private String role;
+        private String content;
+        public HistoryMessage() {}
+        public HistoryMessage(String role, String content) {
+            this.role = role;
+            this.content = content;
+        }
+        public String getRole() { return role; }
+        public void setRole(String role) { this.role = role; }
+        public String getContent() { return content; }
+        public void setContent(String content) { this.content = content; }
     }
 
     public static class ChatResponse {
         private String userId;
         private String question;
         private String answer;
+        /** 回合后的最新摘要（backend 持久化用；无摘要为 null） */
+        private String summary;
+
         public ChatResponse() {}
-        public ChatResponse(String userId, String question, String answer) {
-            this.userId = userId; this.question = question; this.answer = answer;
+        public ChatResponse(String userId, String question, String answer, String summary) {
+            this.userId = userId;
+            this.question = question;
+            this.answer = answer;
+            this.summary = summary;
         }
         public String getUserId() { return userId; }
         public void setUserId(String userId) { this.userId = userId; }
@@ -269,48 +266,8 @@ public class AgentController {
         public void setQuestion(String question) { this.question = question; }
         public String getAnswer() { return answer; }
         public void setAnswer(String answer) { this.answer = answer; }
-    }
-
-    public static class SkillInfo {
-        private String name;
-        private String shortDescription;
-        private String detailedDescription;
-        public SkillInfo() {}
-        public SkillInfo(String name, String shortDescription, String detailedDescription) {
-            this.name = name;
-            this.shortDescription = shortDescription;
-            this.detailedDescription = detailedDescription;
-        }
-        public String getName() { return name; }
-        public void setName(String name) { this.name = name; }
-        public String getShortDescription() { return shortDescription; }
-        public void setShortDescription(String d) { this.shortDescription = d; }
-        public String getDetailedDescription() { return detailedDescription; }
-        public void setDetailedDescription(String d) { this.detailedDescription = d; }
-    }
-
-    public static class MountRequest {
-        private String userId;
-        private String skillName;
-        public MountRequest() {}
-        public String getUserId() { return userId; }
-        public void setUserId(String userId) { this.userId = userId; }
-        public String getSkillName() { return skillName; }
-        public void setSkillName(String skillName) { this.skillName = skillName; }
-    }
-
-    public static class MountedSkillsResponse {
-        private String userId;
-        private Set<String> mountedSkills;
-        public MountedSkillsResponse() {}
-        public MountedSkillsResponse(String userId, Set<String> mountedSkills) {
-            this.userId = userId;
-            this.mountedSkills = mountedSkills;
-        }
-        public String getUserId() { return userId; }
-        public void setUserId(String userId) { this.userId = userId; }
-        public Set<String> getMountedSkills() { return mountedSkills; }
-        public void setMountedSkills(Set<String> mountedSkills) { this.mountedSkills = mountedSkills; }
+        public String getSummary() { return summary; }
+        public void setSummary(String summary) { this.summary = summary; }
     }
 
     public static class ErrorResponse {

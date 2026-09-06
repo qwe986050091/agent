@@ -23,15 +23,20 @@ import java.util.List;
  *
  * 记忆结构：
  * <pre>
- * [系统指令(若有)] [摘要 SystemMessage] [最近 keepRecent 条对话]
+ * [系统指令(若有)] [摘要 SystemMessage(至多一条)] [最近 keepRecent 条对话]
  * </pre>
+ *
+ * <b>无状态化说明：</b>本类不再由 agent 长期持有。每次对话请求由 backend 把持久化的摘要
+ * （MySQL agent_memory 表）与近期历史（chat_message 表）传入，通过 {@link #restore} 重建
+ * 请求级实例；回合结束后 backend 调 {@link #summaryText()} 取回最新摘要并落库。
+ * agent 重启/多实例部署均不丢失上下文。
  *
  * 摘要调用使用同步 {@link ChatModel} 完成，仅在超阈值时触发；若摘要调用失败则保留原文，不中断对话。
  */
 public class SummarizingChatMemory implements ChatMemory {
 
     /** 摘要 SystemMessage 的引导前缀，用于让模型识别这是历史摘要而非用户当前诉求 */
-    private static final String SUMMARY_PREFIX = """
+    static final String SUMMARY_PREFIX = """
 
             【历史对话摘要】
             以下是你和用户**之前**对话的浓缩摘要，用于保持长期上下文连贯。
@@ -45,6 +50,14 @@ public class SummarizingChatMemory implements ChatMemory {
             - 保留关键的已交代事实、用户偏好与身份信息、未完成的任务、重要的工具调用结果
             - 逻辑清晰、语言精炼，控制在合理长度内
             - 不要编造历史中不存在的内容
+            """;
+
+    /** 多轮压缩时，若已有旧摘要，把它合并进新材料的引导语 */
+    private static final String MERGE_OLD_SUMMARY_HINT = """
+            【更早之前的历史摘要】
+            %s
+
+            【之后又发生的对话】
             """;
 
     private final Object id;
@@ -67,6 +80,38 @@ public class SummarizingChatMemory implements ChatMemory {
         this.maxMessages = maxMessages;
         this.keepRecent = keepRecent;
     }
+
+    /**
+     * 按 backend 持久化的状态重建记忆（请求级实例，用完即弃）。
+     *
+     * @param summaryText 上次压缩产生的摘要纯文本（不含 {@link #SUMMARY_PREFIX}），null/空白表示无摘要
+     * @param history     当前消息之前的近期对话（时间升序），role 仅取 user/assistant，其余忽略
+     */
+    public static SummarizingChatMemory restore(Object id, ChatModel summarizerModel,
+                                                int maxMessages, int keepRecent,
+                                                String summaryText, List<HistoryMessage> history) {
+        SummarizingChatMemory memory = new SummarizingChatMemory(id, summarizerModel, maxMessages, keepRecent);
+        if (summaryText != null && !summaryText.isBlank()) {
+            memory.messages.add(SystemMessage.from(SUMMARY_PREFIX + "\n" + summaryText.trim()));
+        }
+        if (history != null) {
+            for (HistoryMessage m : history) {
+                if (m == null || m.content() == null || m.content().isBlank()) {
+                    continue;
+                }
+                if ("assistant".equalsIgnoreCase(m.role())) {
+                    memory.messages.add(AiMessage.from(m.content()));
+                } else if ("user".equalsIgnoreCase(m.role())) {
+                    memory.messages.add(UserMessage.from(m.content()));
+                }
+                // 其他角色（如 tool）不参与跨回合记忆
+            }
+        }
+        return memory;
+    }
+
+    /** 历史消息（backend chat_message 表映射） */
+    public record HistoryMessage(String role, String content) {}
 
     @Override
     public Object id() {
@@ -93,16 +138,39 @@ public class SummarizingChatMemory implements ChatMemory {
     }
 
     /**
-     * 语义压缩：保留系统指令，把最早未被保留的对话交给 LLM 浓缩成摘要 SystemMessage，
-     * 在其后保留最近 {@link #keepRecent} 条原文。
+     * 回合结束后取当前摘要纯文本（去掉引导前缀），供 backend 持久化；无摘要返回 null。
+     */
+    public synchronized String summaryText() {
+        for (ChatMessage m : messages) {
+            if (m instanceof SystemMessage sm && isSummaryMessage(sm.text())) {
+                String body = stripPrefix(sm.text());
+                return body.isBlank() ? null : body;
+            }
+        }
+        return null;
+    }
+
+    /** 判断一条 SystemMessage 是否为历史摘要（前缀文本块以换行开头，需 trim 后匹配） */
+    private static boolean isSummaryMessage(String text) {
+        return text != null && text.trim().startsWith(SUMMARY_PREFIX.trim());
+    }
+
+    /**
+     * 语义压缩：保留非摘要类系统指令（如人设），把旧摘要与最早的对话合并浓缩为
+     * <b>一条</b>新的摘要 SystemMessage，其后保留最近 {@link #keepRecent} 条原文。
+     * 旧摘要会作为材料喂给 LLM 合并，避免多轮压缩后摘要无限堆叠。
      */
     private void compress() {
-        // 拆分原有系统指令与对话消息
         List<ChatMessage> systemMessages = new ArrayList<>();
+        String oldSummary = null;
         List<ChatMessage> dialogue = new ArrayList<>();
         for (ChatMessage m : messages) {
-            if (m instanceof SystemMessage) {
-                systemMessages.add(m); // 已存在的摘要也属于系统指令，一并保留
+            if (m instanceof SystemMessage sm) {
+                if (isSummaryMessage(sm.text())) {
+                    oldSummary = stripPrefix(sm.text());
+                } else {
+                    systemMessages.add(sm); // 人设等非摘要系统指令原样保留
+                }
             } else {
                 dialogue.add(m);
             }
@@ -117,7 +185,7 @@ public class SummarizingChatMemory implements ChatMemory {
 
         String summary;
         try {
-            summary = summarize(toSummarize);
+            summary = summarize(oldSummary, toSummarize);
         } catch (Exception e) {
             // 摘要失败不阻塞对话：保持原样，让窗口继续滑动
             return;
@@ -126,16 +194,19 @@ public class SummarizingChatMemory implements ChatMemory {
             return;
         }
 
-        // 重组：系统指令 + 新摘要 + 最近对话
+        // 重组：非摘要系统指令 + 单条新摘要 + 最近对话
         messages.clear();
         messages.addAll(systemMessages);
         messages.add(SystemMessage.from(SUMMARY_PREFIX + "\n" + summary.trim()));
         messages.addAll(keep);
     }
 
-    /** 调用 LLM 把消息列表压缩成一段中文摘要 */
-    private String summarize(List<ChatMessage> toSummarize) {
+    /** 调用 LLM 把旧摘要（若有）与消息列表合并压缩成一段中文摘要 */
+    private String summarize(String oldSummary, List<ChatMessage> toSummarize) {
         StringBuilder history = new StringBuilder();
+        if (oldSummary != null && !oldSummary.isBlank()) {
+            history.append(MERGE_OLD_SUMMARY_HINT.formatted(oldSummary.trim()));
+        }
         for (ChatMessage m : toSummarize) {
             history.append(roleLabel(m)).append(": ").append(textOf(m)).append("\n");
         }
@@ -149,6 +220,12 @@ public class SummarizingChatMemory implements ChatMemory {
                 .build();
         ChatResponse response = summarizerModel.chat(chatRequest);
         return response == null || response.aiMessage() == null ? null : response.aiMessage().text();
+    }
+
+    private static String stripPrefix(String text) {
+        String trimmed = text.trim();
+        String prefix = SUMMARY_PREFIX.trim();
+        return trimmed.startsWith(prefix) ? trimmed.substring(prefix.length()).trim() : trimmed;
     }
 
     private String roleLabel(ChatMessage m) {
