@@ -29,6 +29,16 @@ langchain4j:
       log-requests: false
       log-responses: false
 
+# ===== RAG 检索增强配置 =====
+# 使用本地进程内 Embedding 模型（bge-small-zh-v1.5 量化版，ONNX），无需外部 API Key
+rag:
+  enabled: true              # 置 false 可完全关闭 RAG（对话不受影响）
+  chunk-size: 500            # 文档切块：每段最大字符数（中文按字符计）
+  chunk-overlap: 50          # 相邻块重叠字符数，避免语义被切断
+  search:
+    max-results: 4           # 每次检索最多召回片段数
+    min-score: 0.5           # 相似度下限（0~1），低于此值不注入上下文
+
 # ===== 日志配置 =====
 logging:
   level:

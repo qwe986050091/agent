@@ -62,6 +62,13 @@
             <artifactId>langchain4j</artifactId>
         </dependency>
 
+        <!-- RAG：本地进程内 Embedding 模型（BGE-small-zh-v1.5 量化版，ONNX 运行）
+             模型文件打包在 jar 内，无需外部 API/Key，中文语义检索；版本由 BOM 管理 -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-embeddings-bge-small-zh-v15-q</artifactId>
+        </dependency>
+
         <!-- Lombok -->
         <dependency>
             <groupId>org.projectlombok</groupId>

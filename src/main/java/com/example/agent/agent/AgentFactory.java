@@ -1,14 +1,17 @@
 package com.example.agent.agent;
 
+import com.example.agent.rag.RagService;
 import com.example.agent.skill.Skill;
 import com.example.agent.skill.SkillManager;
 import dev.langchain4j.memory.ChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
+import dev.langchain4j.rag.content.retriever.ContentRetriever;
 import dev.langchain4j.service.AiServices;
 import dev.langchain4j.service.TokenStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -49,6 +52,8 @@ public class AgentFactory {
     private final ChatModel chatModel;
     private final StreamingChatModel streamingChatModel;
     private final SkillManager skillManager;
+    /** RAG 服务（rag.enabled=false 或降级时可能不存在） */
+    private final ObjectProvider<RagService> ragServiceProvider;
 
     /** 全局共享的对话记忆存储（按 userId 隔离） */
     private final Map<String, ChatMemory> memoryStore = new ConcurrentHashMap<>();
@@ -58,10 +63,12 @@ public class AgentFactory {
     /** 压缩后保留的最近对话条数 */
     private static final int MEMORY_KEEP_RECENT = 20;
 
-    public AgentFactory(ChatModel chatModel, StreamingChatModel streamingChatModel, SkillManager skillManager) {
+    public AgentFactory(ChatModel chatModel, StreamingChatModel streamingChatModel,
+                        SkillManager skillManager, ObjectProvider<RagService> ragServiceProvider) {
         this.chatModel = chatModel;
         this.streamingChatModel = streamingChatModel;
         this.skillManager = skillManager;
+        this.ragServiceProvider = ragServiceProvider;
     }
 
     /**
@@ -75,6 +82,7 @@ public class AgentFactory {
                 .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
                 .tools(toolsOf(mountedSkills))
                 .chatMemoryProvider(this::memoryOf)
+                .contentRetriever(retrieverFor(userId))
                 .build();
 
         return agent.chat(userId, message);
@@ -103,6 +111,7 @@ public class AgentFactory {
                 .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
                 .tools(toolsOf(mountedSkills))
                 .chatMemoryProvider(this::memoryOf)
+                .contentRetriever(retrieverFor(userId))
                 .build();
 
         return agent.chat(userId, message)
@@ -145,6 +154,18 @@ public class AgentFactory {
                 memoryId,
                 id -> new SummarizingChatMemory(id, chatModel, MEMORY_MAX_MESSAGES, MEMORY_KEEP_RECENT)
         );
+    }
+
+    /**
+     * 获取该用户的 RAG 检索器。
+     * RAG 未启用 / 模型加载失败降级时，返回不召回任何内容的空检索器（对话退化为纯记忆模式）。
+     */
+    private ContentRetriever retrieverFor(String userId) {
+        RagService ragService = ragServiceProvider == null ? null : ragServiceProvider.getIfAvailable();
+        if (ragService == null || !ragService.available()) {
+            return query -> List.of();
+        }
+        return ragService.retrieverOf(userId);
     }
 
     /**
