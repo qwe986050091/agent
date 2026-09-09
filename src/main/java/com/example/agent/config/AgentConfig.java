@@ -29,6 +29,9 @@ public class AgentConfig {
     @Value("${langchain4j.open-ai.chat-model.model-name}")
     private String modelName;
 
+    @Value("${langchain4j.open-ai.chat-model.fallback-model-name:deepseek-chat}")
+    private String fallbackModelName;
+
     @Value("${langchain4j.open-ai.chat-model.temperature:0.7}")
     private Double temperature;
 
@@ -65,10 +68,21 @@ public class AgentConfig {
     @Bean
     public ChatModel chatModel() {
         requireApiKey();
+        return buildChatModel(modelName);
+    }
+
+    /** 备用 ChatModel：主模型限流/故障时降级（同步对话 fallback） */
+    @Bean
+    public ChatModel fallbackChatModel() {
+        requireApiKey();
+        return buildChatModel(fallbackModelName);
+    }
+
+    private ChatModel buildChatModel(String name) {
         return OpenAiChatModel.builder()
                 .apiKey(apiKey)
                 .baseUrl(baseUrl)
-                .modelName(modelName)
+                .modelName(name)
                 .temperature(temperature)
                 .topP(topP)
                 .timeout(timeout)
@@ -85,15 +99,28 @@ public class AgentConfig {
     @Bean
     public StreamingChatModel streamingChatModel() {
         requireApiKey();
+        return buildStreamingChatModel(modelName);
+    }
+
+    /** 备用流式 ChatModel：主模型流式启动失败（未输出 token 前）降级用 */
+    @Bean
+    public StreamingChatModel fallbackStreamingChatModel() {
+        requireApiKey();
+        return buildStreamingChatModel(fallbackModelName);
+    }
+
+    private StreamingChatModel buildStreamingChatModel(String name) {
         return OpenAiStreamingChatModel.builder()
                 .apiKey(apiKey)
                 .baseUrl(baseUrl)
-                .modelName(modelName)
+                .modelName(name)
                 .temperature(temperature)
                 .topP(topP)
                 .timeout(timeout)
                 .logRequests(logRequests)
                 .logResponses(logResponses)
+                // 流式模型同样挂 ReAct 监听器：可追踪工具调用循环与生成终止时机
+                .listeners(new ReActLoggerListener())
                 .build();
     }
 }

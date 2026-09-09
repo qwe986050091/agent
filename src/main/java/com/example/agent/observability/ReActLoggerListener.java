@@ -6,6 +6,7 @@ import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.model.chat.listener.ChatModelErrorContext;
 import dev.langchain4j.model.chat.listener.ChatModelListener;
 import dev.langchain4j.model.chat.listener.ChatModelRequestContext;
 import dev.langchain4j.model.chat.listener.ChatModelResponseContext;
@@ -17,7 +18,9 @@ import java.util.List;
 /**
  * ReAct 日志监听器 —— 把 Agent 的每一轮思考过程以人类可读的格式打印到控制台
  *
- * 实现 ChatModelListener，监听 LLM 的请求和响应：
+ * 实现 ChatModelListener（同步/流式模型共用：langchain4j 1.17.2 中流式模型
+ * 的 builder.listeners 也接收 ChatModelListener，流结束/出错时回调 onResponse/onError）。
+ *
  *   - onRequest  : 打印「这一轮发给 LLM 的消息摘要」（用户输入、历史工具结果）
  *   - onResponse : 打印「LLM 的回复」
  *                 · 若 LLM 决定调用工具 → 打印 Action（工具名 + 参数）
@@ -36,9 +39,12 @@ public class ReActLoggerListener implements ChatModelListener {
 
     /** 轮次计数器，同一个 AiService 调用可能触发多次 LLM 请求（工具调用循环） */
     private final ThreadLocal<Integer> round = ThreadLocal.withInitial(() -> 0);
+    /** 同一轮 LLM 调用的错误是否已上报（流式取消/失败时库可能多次回调 onError，避免刷屏） */
+    private final ThreadLocal<Boolean> errorReported = ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     @Override
     public void onRequest(ChatModelRequestContext context) {
+        errorReported.set(Boolean.FALSE);
         round.set(round.get() + 1);
         int r = round.get();
 
@@ -75,7 +81,25 @@ public class ReActLoggerListener implements ChatModelListener {
     public void onResponse(ChatModelResponseContext context) {
         int r = round.get();
         AiMessage ai = context.chatResponse().aiMessage();
+        log.info(renderResponse(r, ai));
 
+        // 如果是最终答案，重置轮次
+        if (!ai.hasToolExecutionRequests()) {
+            round.remove();
+        }
+    }
+
+    @Override
+    public void onError(ChatModelErrorContext context) {
+        if (!errorReported.get()) {
+            log.error("[ReAct] ❌ LLM 调用出错: {}", context.error().getMessage());
+            errorReported.set(Boolean.TRUE);
+        }
+        round.remove();
+    }
+
+    /** 渲染一轮 LLM 响应（同步/流式共用） */
+    private static String renderResponse(int r, AiMessage ai) {
         StringBuilder sb = new StringBuilder();
         sb.append("\n========== ReAct Round ").append(r).append(" <<< RESPONSE ==========");
 
@@ -87,17 +111,6 @@ public class ReActLoggerListener implements ChatModelListener {
         } else {
             sb.append("\n  ✅ Final Answer: ").append(ai.text());
         }
-        log.info(sb.toString());
-
-        // 如果是最终答案，重置轮次
-        if (!ai.hasToolExecutionRequests()) {
-            round.remove();
-        }
-    }
-
-    @Override
-    public void onError(dev.langchain4j.model.chat.listener.ChatModelErrorContext context) {
-        log.error("[ReAct] ❌ LLM 调用出错: {}", context.error().getMessage());
-        round.remove();
+        return sb.toString();
     }
 }

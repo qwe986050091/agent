@@ -12,6 +12,7 @@ import dev.langchain4j.service.TokenStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -52,22 +53,35 @@ public class AgentFactory {
             """;
 
     private final ChatModel chatModel;
+    private final ChatModel fallbackChatModel;
     private final StreamingChatModel streamingChatModel;
+    private final StreamingChatModel fallbackStreamingChatModel;
     private final SkillManager skillManager;
     /** RAG 服务（rag.enabled=false 或降级时可能不存在） */
     private final ObjectProvider<RagService> ragServiceProvider;
+
+    /** 工具调用最大轮次（agent.loop.max-tool-round-trips），超限后强制收敛 */
+    private final int maxToolRoundTrips;
 
     /** 会话总结记忆参数：消息超过该条数即触发一次语义压缩 */
     private static final int MEMORY_MAX_MESSAGES = 40;
     /** 压缩后保留的最近对话条数 */
     private static final int MEMORY_KEEP_RECENT = 20;
 
-    public AgentFactory(ChatModel chatModel, StreamingChatModel streamingChatModel,
-                        SkillManager skillManager, ObjectProvider<RagService> ragServiceProvider) {
+    public AgentFactory(ChatModel chatModel,
+                        ChatModel fallbackChatModel,
+                        StreamingChatModel streamingChatModel,
+                        StreamingChatModel fallbackStreamingChatModel,
+                        SkillManager skillManager,
+                        ObjectProvider<RagService> ragServiceProvider,
+                        @Value("${agent.loop.max-tool-round-trips:15}") int maxToolRoundTrips) {
         this.chatModel = chatModel;
+        this.fallbackChatModel = fallbackChatModel;
         this.streamingChatModel = streamingChatModel;
+        this.fallbackStreamingChatModel = fallbackStreamingChatModel;
         this.skillManager = skillManager;
         this.ragServiceProvider = ragServiceProvider;
+        this.maxToolRoundTrips = maxToolRoundTrips;
     }
 
     /**
@@ -90,13 +104,29 @@ public class AgentFactory {
 
     /**
      * 处理用户对话请求（同步，完整返回回复与最新摘要）
+     *
+     * 主模型失败时自动降级备用模型重试一次（工具轮次超限不属于模型故障，直接抛出由上层收敛）。
      */
     public AgentChatResult chat(AgentChatRequest request) {
         List<Skill> mountedSkills = prepare(request);
 
         SummarizingChatMemory memory = restoreMemory(request);
+        try {
+            return doChat(request, mountedSkills, memory, chatModel);
+        } catch (Exception e) {
+            if (isToolLoopExceeded(e)) {
+                throw e;
+            }
+            log.warn("[AgentFactory] 主模型调用失败，降级备用模型重试: {}", e.getMessage());
+            return doChat(request, mountedSkills, memory, fallbackChatModel);
+        }
+    }
+
+    private AgentChatResult doChat(AgentChatRequest request, List<Skill> mountedSkills,
+                                   SummarizingChatMemory memory, ChatModel model) {
         SimpleAgent agent = AiServices.builder(SimpleAgent.class)
-                .chatModel(chatModel)
+                .chatModel(model)
+                .maxToolCallingRoundTrips(maxToolRoundTrips)
                 .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
                 .tools(toolsOf(mountedSkills))
                 .chatMemoryProvider(memoryId -> memory)
@@ -108,7 +138,7 @@ public class AgentFactory {
     }
 
     /**
-     * 处理用户对话请求（流式），返回已装配回调的 TokenStream。
+     * 处理用户对话请求（流式），返回已装配回调的 TokenStream（使用主流式模型）。
      *
      * 注意：TokenStream.start() 是阻塞执行，调用方需在独立线程中调用：
      * <pre>
@@ -123,11 +153,23 @@ public class AgentFactory {
                                   Consumer<String> onToken,
                                   BiConsumer<String, String> onComplete,
                                   Consumer<Throwable> onError) {
+        return streamChat(request, streamingChatModel, onToken, onComplete, onError);
+    }
+
+    /**
+     * 使用指定流式模型装配 TokenStream（备用模型降级重试用）。
+     */
+    public TokenStream streamChat(AgentChatRequest request,
+                                  StreamingChatModel model,
+                                  Consumer<String> onToken,
+                                  BiConsumer<String, String> onComplete,
+                                  Consumer<Throwable> onError) {
         List<Skill> mountedSkills = prepare(request);
 
         SummarizingChatMemory memory = restoreMemory(request);
         StreamingSimpleAgent agent = AiServices.builder(StreamingSimpleAgent.class)
-                .streamingChatModel(streamingChatModel)
+                .streamingChatModel(model)
+                .maxToolCallingRoundTrips(maxToolRoundTrips)
                 .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
                 .tools(toolsOf(mountedSkills))
                 .chatMemoryProvider(memoryId -> memory)
@@ -142,6 +184,22 @@ public class AgentFactory {
                     onComplete.accept(answer, memory.summaryText());
                 })
                 .onError(onError);
+    }
+
+    /** 判断异常是否为 LangChain4j 工具调用轮次超限（消息形如 "exceeded ... tool calling round trips"） */
+    public static boolean isToolLoopExceeded(Throwable e) {
+        String msg = e == null ? "" : String.valueOf(e.getMessage());
+        return msg.contains("round trips") || msg.contains("maxToolCallingRoundTrips");
+    }
+
+    /**
+     * 使用备用流式模型装配 TokenStream（主模型流式失败且未开始输出时降级重试）。
+     */
+    public TokenStream streamChatFallback(AgentChatRequest request,
+                                          Consumer<String> onToken,
+                                          BiConsumer<String, String> onComplete,
+                                          Consumer<Throwable> onError) {
+        return streamChat(request, fallbackStreamingChatModel, onToken, onComplete, onError);
     }
 
     /**

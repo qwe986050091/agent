@@ -4,6 +4,7 @@ import com.example.agent.agent.AgentFactory;
 import com.example.agent.agent.SummarizingChatMemory;
 import com.example.agent.skill.SkillDefinition;
 import com.example.agent.tools.ToolRegistry;
+import dev.langchain4j.service.TokenStream;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,7 +22,11 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 /**
  * Agent REST API（无状态版：每次请求自带记忆状态与技能定义）
@@ -107,6 +112,12 @@ public class AgentController {
             // Skill 定义引用了不存在的 Tool 等数据不一致问题
             return ResponseEntity.badRequest().body(new ErrorResponse("SKILL_INVALID", e.getMessage()));
         } catch (Exception e) {
+            if (AgentFactory.isToolLoopExceeded(e)) {
+                // 工具调用轮次超限：收敛为友好提示（200），而非 500 报错
+                log.warn("[chat] 工具调用轮次超限，收敛回复: {}", e.getMessage());
+                return ResponseEntity.ok(new ChatResponse(
+                        req.userId(), req.message(), TOOL_LOOP_LIMIT_MESSAGE, req.summary()));
+            }
             log.error("[chat] 对话处理失败", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(new ErrorResponse("CHAT_FAILED", "对话处理失败: " + e.getMessage()));
@@ -135,9 +146,28 @@ public class AgentController {
 
         // 5 分钟超时：超长回复/僵死 LLM 调用不会无限占用线程与连接
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
+        // 请求级取消状态：客户端断开/超时 → 置位并中断流式执行线程，让 LLM 生成真正终止
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+        AtomicReference<Thread> streamThread = new AtomicReference<>();
+
         emitter.onTimeout(() -> {
-            log.warn("[chatStream] SSE 超过 {}ms 未完成，主动断开", SSE_TIMEOUT_MS);
+            log.warn("[chatStream] SSE 超过 {}ms 未完成，主动断开并取消生成", SSE_TIMEOUT_MS);
+            cancelled.set(true);
+            Thread t = streamThread.get();
+            if (t != null) t.interrupt();
             emitter.completeWithError(new TimeoutException("响应超时，请重试"));
+        });
+        emitter.onError(e -> {
+            // 客户端断开 / 发送失败：取消正在进行的 LLM 生成（中断静默期阻塞的读取）
+            log.warn("[chatStream] SSE 连接异常（{}），取消生成",
+                    e == null ? "客户端断开" : e.getMessage());
+            cancelled.set(true);
+            Thread t = streamThread.get();
+            if (t != null) t.interrupt();
+        });
+        emitter.onCompletion(() -> {
+            // 正常结束（complete 已由流线程调用）；兜底置位，避免任何残留回调继续发送
+            cancelled.set(true);
         });
 
         final AgentFactory.AgentChatRequest req;
@@ -148,43 +178,7 @@ public class AgentController {
         }
 
         try {
-            streamExecutor.execute(() -> {
-            try {
-                agentFactory.streamChat(
-                        req,
-                        // 每个 token 片段
-                        token -> {
-                            try {
-                                emitter.send(SseEmitter.event().data(token));
-                            } catch (IOException e) {
-                                throw new RuntimeException("SSE 发送失败，客户端可能已断开", e);
-                            }
-                        },
-                        // 完整回复 + 最新摘要（工具调用循环结束后的最终状态）
-                        (fullAnswer, summary) -> {
-                            try {
-                                // 摘要回传事件：JSON 序列化（换行等特殊字符被转义，保证单行 data）
-                                emitter.send(SseEmitter.event()
-                                        .name("memory")
-                                        .data(Map.of("summary", summary == null ? "" : summary),
-                                                MediaType.APPLICATION_JSON));
-                                emitter.send(SseEmitter.event().data("[DONE]"));
-                                emitter.complete();
-                            } catch (IOException e) {
-                                emitter.completeWithError(e);
-                            }
-                        },
-                        // 异常
-                        error -> {
-                            log.error("[chatStream] 流式对话出错: {}", error.getMessage());
-                            emitter.completeWithError(error);
-                        }
-                ).start();
-            } catch (Exception e) {
-                log.error("[chatStream] 流式对话启动失败", e);
-                emitter.completeWithError(e);
-            }
-        });
+            streamExecutor.execute(() -> runStream(req, emitter, cancelled, streamThread));
         } catch (RejectedExecutionException e) {
             // 线程池/队列已满：快速失败，不排队堆积
             log.warn("[chatStream] 流式线程池已满，拒绝请求");
@@ -193,6 +187,123 @@ public class AgentController {
         }
 
         return emitter;
+    }
+
+    // ==================== 流式执行（护栏：取消传播 / fallback / 轮次收敛） ====================
+
+    /** 工具调用轮次超限时返回给用户的收敛提示 */
+    private static final String TOOL_LOOP_LIMIT_MESSAGE =
+            "已达到最大工具调用轮次，已自动中止以避免死循环。请尝试更简单的指令，或减少连续工具调用。";
+
+    /**
+     * 在流式线程池中执行一次流式对话（主模型）。
+     */
+    private void runStream(AgentFactory.AgentChatRequest req, SseEmitter emitter,
+                           AtomicBoolean cancelled, AtomicReference<Thread> streamThread) {
+        streamThread.set(Thread.currentThread());
+        runStreamWithModel(req, emitter, cancelled, false);
+    }
+
+    /**
+     * 用指定（主/备用）流式模型执行对话，带三类护栏：
+     * 1. 取消传播：客户端断开（cancelled 置位）后，token 回调抛异常终止生成；
+     * 2. 备用模型降级：主模型在「未输出任何 token」前失败 → 用备用模型重跑一次（避免重复输出）；
+     * 3. 工具轮次超限：收敛为友好提示而非报错。
+     */
+    private void runStreamWithModel(AgentFactory.AgentChatRequest req, SseEmitter emitter,
+                                    AtomicBoolean cancelled, boolean useFallback) {
+        AtomicBoolean emitted = new AtomicBoolean(false);
+        AtomicBoolean fallbackUsed = new AtomicBoolean(useFallback);
+        try {
+            // 每个 token 片段
+            Consumer<String> onToken = token -> {
+                if (cancelled.get()) {
+                    throw new RuntimeException("客户端已断开，取消生成");
+                }
+                emitted.set(true);
+                try {
+                    emitter.send(SseEmitter.event().data(token));
+                } catch (IOException e) {
+                    // 客户端（backend）已断开：置位取消，让 handleStreamFailure 走优雅终止而非报错
+                    cancelled.set(true);
+                    throw new RuntimeException("SSE 发送失败，客户端可能已断开", e);
+                }
+            };
+            // 完整回复 + 最新摘要（工具调用循环结束后的最终状态）
+            BiConsumer<String, String> onComplete = (fullAnswer, summary) -> {
+                if (cancelled.get()) {
+                    return; // 已取消：不再补发结束事件
+                }
+                try {
+                    // 摘要回传事件：JSON 序列化（换行等特殊字符被转义，保证单行 data）
+                    emitter.send(SseEmitter.event()
+                            .name("memory")
+                            .data(Map.of("summary", summary == null ? "" : summary),
+                                    MediaType.APPLICATION_JSON));
+                    emitter.send(SseEmitter.event().data("[DONE]"));
+                    emitter.complete();
+                } catch (IOException e) {
+                    emitter.completeWithError(e);
+                }
+            };
+            // 异常（TokenStream 回调路径）
+            Consumer<Throwable> onError =
+                    error -> handleStreamFailure(req, emitter, cancelled, emitted, fallbackUsed, useFallback, error);
+
+            // 主模型失败且未输出 → 用备用模型重跑（入口由 useFallback 决定）
+            TokenStream ts = useFallback
+                    ? agentFactory.streamChatFallback(req, onToken, onComplete, onError)
+                    : agentFactory.streamChat(req, onToken, onComplete, onError);
+            ts.start();
+        } catch (Exception e) {
+            // start() 抛出的异常（请求构造/启动阶段失败，如模型不可用）
+            handleStreamFailure(req, emitter, cancelled, emitted, fallbackUsed, useFallback, e);
+        } finally {
+            if (cancelled.get()) {
+                log.info("[chatStream] 流式生成已终止（客户端取消）");
+            }
+        }
+    }
+
+    /** 统一处理流式失败：取消静默 / 轮次超限收敛 / 未输出则降级备用模型 / 否则报错 */
+    private void handleStreamFailure(AgentFactory.AgentChatRequest req, SseEmitter emitter,
+                                     AtomicBoolean cancelled, AtomicBoolean emitted,
+                                     AtomicBoolean fallbackUsed, boolean useFallback, Throwable error) {
+        if (cancelled.get()) {
+            // 用户主动停止：静默结束，不补发错误事件
+            try {
+                emitter.complete();
+            } catch (Exception ignore) {
+                // emitter 已断开则忽略
+            }
+            return;
+        }
+        if (AgentFactory.isToolLoopExceeded(error)) {
+            log.warn("[chatStream] 工具调用轮次超限，收敛回复: {}", error.getMessage());
+            sendConverged(emitter, req);
+            return;
+        }
+        if (!emitted.get() && !fallbackUsed.getAndSet(true)) {
+            log.warn("[chatStream] 主模型流式失败（未开始输出），降级备用模型重试: {}", error.getMessage());
+            runStreamWithModel(req, emitter, cancelled, true);
+            return;
+        }
+        log.error("[chatStream] 流式对话出错: {}", error.getMessage());
+        emitter.completeWithError(error);
+    }
+
+    /** 工具轮次超限时：发送收敛提示 + 原摘要 + [DONE]，正常结束流 */
+    private void sendConverged(SseEmitter emitter, AgentFactory.AgentChatRequest req) {
+        try {
+            emitter.send(SseEmitter.event().data(TOOL_LOOP_LIMIT_MESSAGE));
+            emitter.send(SseEmitter.event().name("memory")
+                    .data(Map.of("summary", req.summary() == null ? "" : req.summary()),
+                            MediaType.APPLICATION_JSON));
+            emitter.send(SseEmitter.event().data("[DONE]"));
+            emitter.complete();
+        } catch (IOException e) {
+            emitter.completeWithError(e);
+        }
     }
 
     @GetMapping("/health")
