@@ -87,9 +87,9 @@ public class AgentController {
                                      @RequestParam String message) {
         ResponseEntity<?> bad = requireMessage(message);
         if (bad != null) return bad;
-        // GET 便捷入口：不带历史/技能，纯无状态对话
+        // GET 便捷入口：不带历史/技能，纯无状态对话（默认会话 0）
         AgentFactory.AgentChatRequest req =
-                new AgentFactory.AgentChatRequest(userId, message, null, List.of(), List.of());
+                new AgentFactory.AgentChatRequest(userId, 0L, message, null, List.of(), List.of());
         return runChat(req);
     }
 
@@ -333,6 +333,8 @@ public class AgentController {
 
     public static class ChatRequest {
         private String userId = "default";
+        /** 会话 id（多会话：同一用户不同会话记忆隔离；缺省 0） */
+        private Long conversationId = 0L;
         private String message;
         /** 持久化的历史摘要纯文本（无则 null） */
         private String summary;
@@ -348,6 +350,9 @@ public class AgentController {
             if (userId == null || userId.isBlank()) {
                 userId = "default";
             }
+            if (conversationId == null) {
+                conversationId = 0L;
+            }
             if (history == null) {
                 history = List.of();
             }
@@ -361,11 +366,13 @@ public class AgentController {
                     .filter(h -> h != null && h.getRole() != null && h.getContent() != null)
                     .map(h -> new SummarizingChatMemory.HistoryMessage(h.getRole(), h.getContent()))
                     .toList();
-            return new AgentFactory.AgentChatRequest(userId, message, summary, hist, skills);
+            return new AgentFactory.AgentChatRequest(userId, conversationId, message, summary, hist, skills);
         }
 
         public String getUserId() { return userId; }
         public void setUserId(String userId) { this.userId = userId; }
+        public Long getConversationId() { return conversationId; }
+        public void setConversationId(Long conversationId) { this.conversationId = conversationId; }
         public String getMessage() { return message; }
         public void setMessage(String message) { this.message = message; }
         public String getSummary() { return summary; }

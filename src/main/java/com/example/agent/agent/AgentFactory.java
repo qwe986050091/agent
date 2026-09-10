@@ -92,10 +92,16 @@ public class AgentFactory {
      * @param skills  该用户已挂载的 Skill 定义（内置技能可只填 name）
      */
     public record AgentChatRequest(String userId,
+                                   Long conversationId,
                                    String message,
                                    String summary,
                                    List<SummarizingChatMemory.HistoryMessage> history,
                                    List<SkillDefinition> skills) {
+
+        /** 请求级记忆的唯一键：用户 + 会话（多会话互不串上下文；RAG 检索仍按 userId） */
+        public String memoryId() {
+            return userId + "::" + (conversationId == null ? 0 : conversationId);
+        }
     }
 
     /** 同步对话结果：回复文本 + 回合后的最新摘要（供 backend 持久化） */
@@ -133,7 +139,7 @@ public class AgentFactory {
                 .contentRetriever(retrieverFor(request.userId()))
                 .build();
 
-        String answer = agent.chat(request.userId(), request.message());
+        String answer = agent.chat(request.memoryId(), request.message());
         return new AgentChatResult(answer == null ? "" : answer, memory.summaryText());
     }
 
@@ -176,7 +182,7 @@ public class AgentFactory {
                 .contentRetriever(retrieverFor(request.userId()))
                 .build();
 
-        return agent.chat(request.userId(), request.message())
+        return agent.chat(request.memoryId(), request.message())
                 .onPartialResponse(onToken)
                 .onCompleteResponse(response -> {
                     String text = response.aiMessage().text();
@@ -217,10 +223,10 @@ public class AgentFactory {
         return mountedSkills;
     }
 
-    /** 按 backend 下发的摘要 + 历史重建请求级记忆（用完即弃，不跨请求保留） */
+    /** 按 backend 下发的摘要 + 历史重建请求级记忆（记忆键=用户+会话；用完即弃，不跨请求保留） */
     private SummarizingChatMemory restoreMemory(AgentChatRequest request) {
         return SummarizingChatMemory.restore(
-                request.userId(), chatModel,
+                request.memoryId(), chatModel,
                 MEMORY_MAX_MESSAGES, MEMORY_KEEP_RECENT,
                 request.summary(), request.history());
     }
