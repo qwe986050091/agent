@@ -43,6 +43,17 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
+        <!-- Actuator + Micrometer/Prometheus：独立管理端口暴露 /actuator/prometheus
+             （对话延迟/QPS、LLM 调用与 token、工具成功率、RAG 命中率、SSE 在途数） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
         <!-- LangChain4j Spring Boot Starter（自动装配） -->
         <dependency>
             <groupId>dev.langchain4j</groupId>

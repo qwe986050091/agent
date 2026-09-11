@@ -56,9 +56,11 @@ public class RagService {
     public static final String META_TYPE = "type";
     public static final String TYPE_DOCUMENT = "document";
     public static final String TYPE_CONVERSATION = "conversation";
-    /** 片段 metadata 键：文档名 / 文档ID */
+    /** 片段 metadata 键：来源名 / 文档ID */
     public static final String META_SOURCE = "source";
     public static final String META_DOC_ID = "docId";
+    /** 片段 metadata 键：检索时的向量相似度分数（检索阶段临时写入副本，供观测采集读取，不落快照） */
+    public static final String META_SCORE = "_score";
 
     private final EmbeddingStore<TextSegment> embeddingStore;
     /** 向量快照文件路径（null 表示不落盘） */
@@ -179,8 +181,13 @@ public class RagService {
                 EmbeddingSearchResult<TextSegment> result = embeddingStore.search(request);
                 List<Content> contents = new ArrayList<>();
                 for (EmbeddingMatch<TextSegment> match : result.matches()) {
-                    if (match.embedded() != null) {
-                        contents.add(Content.from(match.embedded()));
+                    TextSegment embedded = match.embedded();
+                    if (embedded != null) {
+                        // 副本 metadata 写入相似度分数（不改库存片段，不影响快照），供观测采集读取
+                        Metadata metadata = embedded.metadata() == null
+                                ? new Metadata() : embedded.metadata().copy();
+                        metadata.put(META_SCORE, match.score());
+                        contents.add(Content.from(TextSegment.from(embedded.text(), metadata)));
                     }
                 }
                 log.debug("[RAG] 用户 {} 检索「{}」召回 {} 个片段", userId, query.text(), contents.size());

@@ -2,10 +2,19 @@ package com.example.agent.controller;
 
 import com.example.agent.agent.AgentFactory;
 import com.example.agent.agent.SummarizingChatMemory;
+import com.example.agent.observability.AgentMetricsSink;
+import com.example.agent.observability.TraceCollector;
+import com.example.agent.observability.TraceContextHolder;
+import com.example.agent.observability.TraceMdcFilter;
+import com.example.agent.observability.model.ToolTraceEvent;
+import com.example.agent.observability.model.TraceEvent;
+import com.example.agent.observability.model.UsageTraceEvent;
 import com.example.agent.skill.SkillDefinition;
 import com.example.agent.tools.ToolRegistry;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.service.TokenStream;
 import jakarta.annotation.PreDestroy;
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -36,11 +45,12 @@ import java.util.function.Consumer;
  *   GET  /api/agent/chat              对话（GET，无历史的便捷测试入口）
  *   POST /api/agent/chat              对话（POST，body 携带 summary/history/skills）
  *   POST /api/agent/chat/stream       流式对话（SSE）；token 事件逐片段推送，
- *                                     结束前发 event: memory（含最新摘要），再发 data: [DONE]
+ *                                     过程中发 tool/rag 事件，结束前发 usage、memory，再 data: [DONE]
  *   GET  /api/agent/tools             列出平台内置可用 Tool 名称
  *
- * 说明：技能的上传/挂载/注销等状态管理全部由 backend（MySQL）负责，
- * agent 不再保存技能与挂载状态，故无 /skills/upload、/skills/mount 等接口。
+ * 可观测：traceId 由 {@link TraceMdcFilter} 入站确定；本控制器在工作线程开启
+ * {@link TraceCollector}（ThreadLocal），listener/RAG 采集的事件经 SSE 命名事件
+ * 实时回传 backend，回合末随同步 JSON 或 usage 事件返回聚合用量。
  */
 @RestController
 @RequestMapping("/api/agent")
@@ -74,67 +84,98 @@ public class AgentController {
 
     private final AgentFactory agentFactory;
     private final ToolRegistry toolRegistry;
+    private final AgentMetricsSink metrics;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public AgentController(AgentFactory agentFactory, ToolRegistry toolRegistry) {
+    public AgentController(AgentFactory agentFactory, ToolRegistry toolRegistry,
+                           AgentMetricsSink metrics) {
         this.agentFactory = agentFactory;
         this.toolRegistry = toolRegistry;
+        this.metrics = metrics;
     }
 
     // ==================== 对话接口 ====================
 
     @GetMapping("/chat")
-    public ResponseEntity<?> chatGet(@RequestParam(defaultValue = "default") String userId,
+    public ResponseEntity<?> chatGet(HttpServletRequest httpRequest,
+                                     @RequestParam(defaultValue = "default") String userId,
                                      @RequestParam String message) {
         ResponseEntity<?> bad = requireMessage(message);
         if (bad != null) return bad;
         // GET 便捷入口：不带历史/技能，纯无状态对话（默认会话 0）
         AgentFactory.AgentChatRequest req =
                 new AgentFactory.AgentChatRequest(userId, 0L, message, null, List.of(), List.of());
-        return runChat(req);
+        return runChat(req, traceIdOf(httpRequest));
     }
 
     @PostMapping("/chat")
-    public ResponseEntity<?> chatPost(@RequestBody ChatRequest request) {
+    public ResponseEntity<?> chatPost(HttpServletRequest httpRequest, @RequestBody ChatRequest request) {
         if (request == null) {
             return ResponseEntity.badRequest().body(new ErrorResponse("BAD_REQUEST", "请求体为空"));
         }
         request.normalize();
         ResponseEntity<?> bad = requireMessage(request.getMessage());
         if (bad != null) return bad;
-        return runChat(request.toAgentRequest());
+        return runChat(request.toAgentRequest(), traceIdOf(httpRequest));
     }
 
-    private ResponseEntity<?> runChat(AgentFactory.AgentChatRequest req) {
+    private ResponseEntity<?> runChat(AgentFactory.AgentChatRequest req, String traceId) {
+        // 同步对话整条 AiServices 链在 Tomcat 线程执行：直接在当前线程开启采集
+        TraceCollector collector = TraceContextHolder.start(
+                traceId, req.userId(), req.conversationId(), null, metrics);
+        long start = System.nanoTime();
         try {
-            AgentFactory.AgentChatResult result = agentFactory.chat(req);
-            return ResponseEntity.ok(new ChatResponse(req.userId(), req.message(), result.answer(), result.summary()));
-        } catch (IllegalArgumentException e) {
-            // Skill 定义引用了不存在的 Tool 等数据不一致问题
-            return ResponseEntity.badRequest().body(new ErrorResponse("SKILL_INVALID", e.getMessage()));
-        } catch (Exception e) {
-            if (AgentFactory.isToolLoopExceeded(e)) {
-                // 工具调用轮次超限：收敛为友好提示（200），而非 500 报错
-                log.warn("[chat] 工具调用轮次超限，收敛回复: {}", e.getMessage());
-                return ResponseEntity.ok(new ChatResponse(
-                        req.userId(), req.message(), TOOL_LOOP_LIMIT_MESSAGE, req.summary()));
+            AgentFactory.AgentChatResult result;
+            try {
+                result = agentFactory.chat(req);
+            } catch (IllegalArgumentException e) {
+                // Skill 定义引用了不存在的 Tool 等数据不一致问题
+                metrics.recordChat("sync", "error", elapsedMs(start));
+                return ResponseEntity.badRequest().body(new ErrorResponse("SKILL_INVALID", e.getMessage()));
+            } catch (Exception e) {
+                if (AgentFactory.isToolLoopExceeded(e)) {
+                    metrics.recordChat("sync", "converged", elapsedMs(start));
+                    log.warn("[chat] 工具调用轮次超限，收敛回复: {}", e.getMessage());
+                    return ResponseEntity.ok(buildResponse(req, collector,
+                            TOOL_LOOP_LIMIT_MESSAGE, req.summary()));
+                }
+                metrics.recordChat("sync", "error", elapsedMs(start));
+                log.error("[chat] 对话处理失败", e);
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body(new ErrorResponse("CHAT_FAILED", "对话处理失败: " + e.getMessage()));
             }
-            log.error("[chat] 对话处理失败", e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(new ErrorResponse("CHAT_FAILED", "对话处理失败: " + e.getMessage()));
+            metrics.recordChat("sync", "success", elapsedMs(start));
+            return ResponseEntity.ok(buildResponse(req, collector, result.answer(), result.summary()));
+        } finally {
+            TraceContextHolder.clear();
         }
+    }
+
+    /** 构造同步对话响应（含 traceId/usage/tools/retrievals） */
+    private ChatResponse buildResponse(AgentFactory.AgentChatRequest req, TraceCollector collector,
+                                       String answer, String summary) {
+        UsageTraceEvent usage = collector.toUsageEvent(false);
+        return new ChatResponse(req.userId(), req.message(), answer, summary,
+                collector.traceId(), usage, collector.tools(), collector.retrievals());
+    }
+
+    private static long elapsedMs(long startNanos) {
+        return (System.nanoTime() - startNanos) / 1_000_000L;
     }
 
     /**
      * 流式对话（SSE）：逐 token 推送
      *
      * 事件格式（标准 text/event-stream）：
-     *   data: 你好                 ← 每个 token 一个事件（默认 event）
-     *   event: memory              ← 回合结束，回传最新记忆摘要（backend 落库用，不转发前端）
-     *   data: {"summary":"..."}
+     *   data: token                ← 每个 token 一个默认事件
+     *   event: tool  data: {...}   ← 工具调用（参数/结果/成败/耗时）
+     *   event: rag   data: {...}   ← RAG 召回片段（来源/文本/相似度）
+     *   event: usage data: {...}   ← 整轮聚合 token 用量/模型/轮次/耗时
+     *   event: memory data: {...}  ← 回合摘要（backend 落库用，不转发前端）
      *   data: [DONE]               ← 结束标记
      */
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Object chatStream(@RequestBody(required = false) ChatRequest request) {
+    public Object chatStream(HttpServletRequest httpRequest, @RequestBody(required = false) ChatRequest request) {
         if (request == null) {
             return ResponseEntity.badRequest().body(new ErrorResponse("BAD_REQUEST", "请求体为空"));
         }
@@ -149,6 +190,9 @@ public class AgentController {
         // 请求级取消状态：客户端断开/超时 → 置位并中断流式执行线程，让 LLM 生成真正终止
         AtomicBoolean cancelled = new AtomicBoolean(false);
         AtomicReference<Thread> streamThread = new AtomicReference<>();
+
+        String traceId = traceIdOf(httpRequest);
+        long acceptedAt = System.nanoTime();
 
         emitter.onTimeout(() -> {
             log.warn("[chatStream] SSE 超过 {}ms 未完成，主动断开并取消生成", SSE_TIMEOUT_MS);
@@ -178,9 +222,12 @@ public class AgentController {
         }
 
         try {
-            streamExecutor.execute(() -> runStream(req, emitter, cancelled, streamThread));
+            metrics.changeSseActive(+1);
+            streamExecutor.execute(() -> runStream(req, emitter, cancelled, streamThread, traceId));
         } catch (RejectedExecutionException e) {
             // 线程池/队列已满：快速失败，不排队堆积
+            metrics.changeSseActive(-1);
+            metrics.recordChat("stream", "busy", elapsedMs(acceptedAt));
             log.warn("[chatStream] 流式线程池已满，拒绝请求");
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                     .body(new ErrorResponse("SERVICE_BUSY", "当前对话繁忙，请稍后重试"));
@@ -189,31 +236,57 @@ public class AgentController {
         return emitter;
     }
 
-    // ==================== 流式执行（护栏：取消传播 / fallback / 轮次收敛） ====================
+    // ==================== 流式执行（护栏：取消传播 / fallback / 轮次收敛 / trace） ====================
 
     /** 工具调用轮次超限时返回给用户的收敛提示 */
     private static final String TOOL_LOOP_LIMIT_MESSAGE =
             "已达到最大工具调用轮次，已自动中止以避免死循环。请尝试更简单的指令，或减少连续工具调用。";
 
     /**
-     * 在流式线程池中执行一次流式对话（主模型）。
+     * 在流式线程池中执行一次流式对话。在工作线程开启请求级 trace 采集，
+     * live sink 把 tool/rag 事件即时发为 SSE 命名事件。
      */
     private void runStream(AgentFactory.AgentChatRequest req, SseEmitter emitter,
-                           AtomicBoolean cancelled, AtomicReference<Thread> streamThread) {
+                           AtomicBoolean cancelled, AtomicReference<Thread> streamThread,
+                           String traceId) {
         streamThread.set(Thread.currentThread());
-        runStreamWithModel(req, emitter, cancelled, false);
+        TraceCollector collector = TraceContextHolder.start(
+                traceId, req.userId(), req.conversationId(),
+                event -> emitTraceEvent(emitter, cancelled, event), metrics);
+        long start = System.nanoTime();
+        try {
+            runStreamWithModel(req, emitter, cancelled, collector, false, start);
+        } finally {
+            TraceContextHolder.clear();
+            metrics.changeSseActive(-1);
+        }
     }
 
     /**
-     * 用指定（主/备用）流式模型执行对话，带三类护栏：
+     * 用指定（主/备用）流式模型执行对话，带四类护栏：
      * 1. 取消传播：客户端断开（cancelled 置位）后，token 回调抛异常终止生成；
      * 2. 备用模型降级：主模型在「未输出任何 token」前失败 → 用备用模型重跑一次（避免重复输出）；
-     * 3. 工具轮次超限：收敛为友好提示而非报错。
+     * 3. 工具轮次超限：收敛为友好提示而非报错；
+     * 4. trace 采集：tool/rag 即时事件 + 回合末 usage 事件 + outcome 指标（仅记一次）。
      */
     private void runStreamWithModel(AgentFactory.AgentChatRequest req, SseEmitter emitter,
-                                    AtomicBoolean cancelled, boolean useFallback) {
+                                    AtomicBoolean cancelled, TraceCollector collector,
+                                    boolean useFallback, long start) {
+        if (useFallback) {
+            // 重放前清空首轮 trace 并通知 backend/前端 reset（工具可能已在首轮真实执行）
+            collector.prepareForFallback();
+        }
         AtomicBoolean emitted = new AtomicBoolean(false);
         AtomicBoolean fallbackUsed = new AtomicBoolean(useFallback);
+        AtomicBoolean outcomeRecorded = new AtomicBoolean(false);
+
+        // 回合 outcome 只允许记录一次（complete/error/cancel 可能多路径触发）
+        Consumer<String> recordOutcome = outcome -> {
+            if (outcomeRecorded.compareAndSet(false, true)) {
+                metrics.recordChat("stream", outcome, elapsedMs(start));
+            }
+        };
+
         try {
             // 每个 token 片段
             Consumer<String> onToken = token -> {
@@ -232,9 +305,12 @@ public class AgentController {
             // 完整回复 + 最新摘要（工具调用循环结束后的最终状态）
             BiConsumer<String, String> onComplete = (fullAnswer, summary) -> {
                 if (cancelled.get()) {
+                    recordOutcome.accept("cancelled");
                     return; // 已取消：不再补发结束事件
                 }
                 try {
+                    // usage 必须在 memory/[DONE] 之前发送（backend 落库 + 前端底栏）
+                    emitTraceEvent(emitter, cancelled, collector.toUsageEvent(false));
                     // 摘要回传事件：JSON 序列化（换行等特殊字符被转义，保证单行 data）
                     emitter.send(SseEmitter.event()
                             .name("memory")
@@ -242,13 +318,16 @@ public class AgentController {
                                     MediaType.APPLICATION_JSON));
                     emitter.send(SseEmitter.event().data("[DONE]"));
                     emitter.complete();
+                    recordOutcome.accept("success");
                 } catch (IOException e) {
                     emitter.completeWithError(e);
+                    recordOutcome.accept("error");
                 }
             };
             // 异常（TokenStream 回调路径）
-            Consumer<Throwable> onError =
-                    error -> handleStreamFailure(req, emitter, cancelled, emitted, fallbackUsed, useFallback, error);
+            Consumer<Throwable> onError = error -> handleStreamFailure(
+                    req, emitter, cancelled, emitted, fallbackUsed, collector, useFallback,
+                    error, start, recordOutcome);
 
             // 主模型失败且未输出 → 用备用模型重跑（入口由 useFallback 决定）
             TokenStream ts = useFallback
@@ -257,7 +336,8 @@ public class AgentController {
             ts.start();
         } catch (Exception e) {
             // start() 抛出的异常（请求构造/启动阶段失败，如模型不可用）
-            handleStreamFailure(req, emitter, cancelled, emitted, fallbackUsed, useFallback, e);
+            handleStreamFailure(req, emitter, cancelled, emitted, fallbackUsed, collector,
+                    useFallback, e, start, recordOutcome);
         } finally {
             if (cancelled.get()) {
                 log.info("[chatStream] 流式生成已终止（客户端取消）");
@@ -268,9 +348,12 @@ public class AgentController {
     /** 统一处理流式失败：取消静默 / 轮次超限收敛 / 未输出则降级备用模型 / 否则报错 */
     private void handleStreamFailure(AgentFactory.AgentChatRequest req, SseEmitter emitter,
                                      AtomicBoolean cancelled, AtomicBoolean emitted,
-                                     AtomicBoolean fallbackUsed, boolean useFallback, Throwable error) {
+                                     AtomicBoolean fallbackUsed, TraceCollector collector,
+                                     boolean useFallback, Throwable error, long start,
+                                     Consumer<String> recordOutcome) {
         if (cancelled.get()) {
-            // 用户主动停止：静默结束，不补发错误事件
+            // 用户主动停止：静默结束，不补发错误事件（连接通常已断）
+            recordOutcome.accept("cancelled");
             try {
                 emitter.complete();
             } catch (Exception ignore) {
@@ -280,29 +363,55 @@ public class AgentController {
         }
         if (AgentFactory.isToolLoopExceeded(error)) {
             log.warn("[chatStream] 工具调用轮次超限，收敛回复: {}", error.getMessage());
-            sendConverged(emitter, req);
+            sendConverged(emitter, req, collector, recordOutcome);
             return;
         }
         if (!emitted.get() && !fallbackUsed.getAndSet(true)) {
             log.warn("[chatStream] 主模型流式失败（未开始输出），降级备用模型重试: {}", error.getMessage());
-            runStreamWithModel(req, emitter, cancelled, true);
+            runStreamWithModel(req, emitter, cancelled, collector, true, start);
             return;
         }
         log.error("[chatStream] 流式对话出错: {}", error.getMessage());
+        recordOutcome.accept("error");
         emitter.completeWithError(error);
     }
 
-    /** 工具轮次超限时：发送收敛提示 + 原摘要 + [DONE]，正常结束流 */
-    private void sendConverged(SseEmitter emitter, AgentFactory.AgentChatRequest req) {
+    /** 工具轮次超限时：发送 usage + 收敛提示 + 摘要 + [DONE]，正常结束流 */
+    private void sendConverged(SseEmitter emitter, AgentFactory.AgentChatRequest req,
+                               TraceCollector collector, Consumer<String> recordOutcome) {
         try {
+            emitTraceEvent(emitter, new AtomicBoolean(false), collector.toUsageEvent(false));
             emitter.send(SseEmitter.event().data(TOOL_LOOP_LIMIT_MESSAGE));
             emitter.send(SseEmitter.event().name("memory")
                     .data(Map.of("summary", req.summary() == null ? "" : req.summary()),
                             MediaType.APPLICATION_JSON));
             emitter.send(SseEmitter.event().data("[DONE]"));
             emitter.complete();
+            recordOutcome.accept("converged");
         } catch (IOException e) {
             emitter.completeWithError(e);
+            recordOutcome.accept("error");
+        }
+    }
+
+    /** 发送一个命名 trace 事件（tool/rag/usage）；客户端已取消/断连则静默跳过 */
+    private void emitTraceEvent(SseEmitter emitter, AtomicBoolean cancelled, TraceEvent event) {
+        if (cancelled.get()) {
+            return;
+        }
+        try {
+            String name = switch (event) {
+                case ToolTraceEvent ignored -> "tool";
+                case com.example.agent.observability.model.RagTraceEvent ignored -> "rag";
+                case UsageTraceEvent ignored -> "usage";
+                case com.example.agent.observability.model.TraceResetEvent ignored -> "trace-reset";
+            };
+            String json = objectMapper.writeValueAsString(event);
+            emitter.send(SseEmitter.event().name(name).data(json, MediaType.APPLICATION_JSON));
+        } catch (Exception e) {
+            // 断连/序列化失败不影响主流程
+            log.debug("[chatStream] trace 事件 {} 发送失败: {}",
+                    event.getClass().getSimpleName(), e.getMessage());
         }
     }
 
@@ -327,6 +436,12 @@ public class AgentController {
                     .body(new ErrorResponse("EMPTY_MESSAGE", "参数 message 不能为空或纯空白字符"));
         }
         return null;
+    }
+
+    /** 从 TraceMdcFilter 设置的请求属性取 traceId（兜底防御生成） */
+    private static String traceIdOf(HttpServletRequest request) {
+        Object traceId = request.getAttribute(TraceMdcFilter.TRACE_REQUEST_ATTR);
+        return traceId == null ? java.util.UUID.randomUUID().toString() : traceId.toString();
     }
 
     // ==================== DTO ====================
@@ -403,14 +518,31 @@ public class AgentController {
         private String answer;
         /** 回合后的最新摘要（backend 持久化用；无摘要为 null） */
         private String summary;
+        /** 全链路 traceId（backend 落库关联 + 日志串联） */
+        private String traceId;
+        /** 整轮 token 用量聚合 */
+        private UsageTraceEvent usage;
+        /** 本轮发生的工具调用（按发生顺序） */
+        private List<ToolTraceEvent> tools;
+        /** 本轮发生的 RAG 检索（含召回片段） */
+        private List<com.example.agent.observability.model.RagTraceEvent> retrievals;
 
         public ChatResponse() {}
-        public ChatResponse(String userId, String question, String answer, String summary) {
+
+        public ChatResponse(String userId, String question, String answer, String summary,
+                            String traceId, UsageTraceEvent usage,
+                            List<ToolTraceEvent> tools,
+                            List<com.example.agent.observability.model.RagTraceEvent> retrievals) {
             this.userId = userId;
             this.question = question;
             this.answer = answer;
             this.summary = summary;
+            this.traceId = traceId;
+            this.usage = usage;
+            this.tools = tools;
+            this.retrievals = retrievals;
         }
+
         public String getUserId() { return userId; }
         public void setUserId(String userId) { this.userId = userId; }
         public String getQuestion() { return question; }
@@ -419,6 +551,16 @@ public class AgentController {
         public void setAnswer(String answer) { this.answer = answer; }
         public String getSummary() { return summary; }
         public void setSummary(String summary) { this.summary = summary; }
+        public String getTraceId() { return traceId; }
+        public void setTraceId(String traceId) { this.traceId = traceId; }
+        public UsageTraceEvent getUsage() { return usage; }
+        public void setUsage(UsageTraceEvent usage) { this.usage = usage; }
+        public List<ToolTraceEvent> getTools() { return tools; }
+        public void setTools(List<ToolTraceEvent> tools) { this.tools = tools; }
+        public List<com.example.agent.observability.model.RagTraceEvent> getRetrievals() { return retrievals; }
+        public void setRetrievals(List<com.example.agent.observability.model.RagTraceEvent> retrievals) {
+            this.retrievals = retrievals;
+        }
     }
 
     public static class ErrorResponse {

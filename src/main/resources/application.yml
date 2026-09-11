@@ -1,6 +1,22 @@
 server:
   port: 8080
 
+# ===== 管理端口（actuator/prometheus） =====
+# 独立端口且只绑 127.0.0.1：只供本机 Prometheus 抓取/排障，
+# 不经 nginx、不走安全组，外部网络不可达（纵深防御）。
+# 生产可用环境变量 MANAGEMENT_PORT 改端口。
+management:
+  server:
+    port: ${MANAGEMENT_PORT:18080}
+    address: 127.0.0.1
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      show-details: never
+
 spring:
   application:
     name: simple-agent
@@ -67,5 +83,5 @@ logging:
     # Spring 框架：WARN，减少启动噪音
     org.springframework: WARN
   pattern:
-    # 简化日志格式，突出 ReAct 内容
-    console: "%d{HH:mm:ss} %-5level %logger{36} - %msg%n"
+    # 日志格式：[traceId] 串联 frontend→backend→agent→LLM/工具/RAG 全链路（无 trace 时显示 -）
+    console: "%d{HH:mm:ss} %-5level [%X{traceId:-}] %logger{36} - %msg%n"

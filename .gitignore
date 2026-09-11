@@ -97,3 +97,4 @@ settings.xml
 *.jfr
 heapdump*.hprof
 java_pid*.hprof
+deploy-test/

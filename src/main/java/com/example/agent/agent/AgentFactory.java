@@ -1,5 +1,9 @@
 package com.example.agent.agent;
 
+import com.example.agent.observability.ObservabilityRetriever;
+import com.example.agent.observability.TraceAwareStreamingChatModel;
+import com.example.agent.observability.TraceCollector;
+import com.example.agent.observability.TraceContextHolder;
 import com.example.agent.rag.RagService;
 import com.example.agent.skill.Skill;
 import com.example.agent.skill.SkillDefinition;
@@ -124,6 +128,11 @@ public class AgentFactory {
                 throw e;
             }
             log.warn("[AgentFactory] 主模型调用失败，降级备用模型重试: {}", e.getMessage());
+            // 标记 fallback 并清空首轮 trace（首轮可能已执行工具/触发 RAG，避免同步 JSON 重复）
+            TraceCollector collector = TraceContextHolder.current();
+            if (collector != null) {
+                collector.prepareForFallback();
+            }
             return doChat(request, mountedSkills, memory, fallbackChatModel);
         }
     }
@@ -173,8 +182,13 @@ public class AgentFactory {
         List<Skill> mountedSkills = prepare(request);
 
         SummarizingChatMemory memory = restoreMemory(request);
+        // 流式回调在 HTTP 客户端线程执行，ThreadLocal 采集器不可见：
+        // 用请求级装饰器显式绑定当前 collector（采集工具往返/token），能力与元数据透传
+        TraceCollector collector = TraceContextHolder.current();
+        StreamingChatModel effectiveModel = collector == null
+                ? model : new TraceAwareStreamingChatModel(model, collector);
         StreamingSimpleAgent agent = AiServices.builder(StreamingSimpleAgent.class)
-                .streamingChatModel(model)
+                .streamingChatModel(effectiveModel)
                 .maxToolCallingRoundTrips(maxToolRoundTrips)
                 .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
                 .tools(toolsOf(mountedSkills))
@@ -241,15 +255,16 @@ public class AgentFactory {
     }
 
     /**
-     * 获取该用户的 RAG 检索器。
-     * RAG 未启用 / 模型加载失败降级时，返回不召回任何内容的空检索器（对话退化为纯记忆模式）。
+     * 获取该用户的 RAG 检索器（可观测装饰器包装：采集召回片段与相似度发往当前 trace）。
+     * RAG 未启用 / 模型加载失败降级时，返回不召回任何内容的空检索器（对话退化为纯记忆模式），
+     * 空检索器同样被观测为 miss。
      */
     private ContentRetriever retrieverFor(String userId) {
         RagService ragService = ragServiceProvider == null ? null : ragServiceProvider.getIfAvailable();
         if (ragService == null || !ragService.available()) {
-            return query -> List.of();
+            return new ObservabilityRetriever(query -> List.of());
         }
-        return ragService.retrieverOf(userId);
+        return new ObservabilityRetriever(ragService.retrieverOf(userId));
     }
 
     /**

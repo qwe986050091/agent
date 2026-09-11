@@ -1,5 +1,7 @@
 package com.example.agent.config;
 
+import com.example.agent.observability.AgentMetricsSink;
+import com.example.agent.observability.ObservabilityChatModelListener;
 import com.example.agent.observability.ReActLoggerListener;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
@@ -47,6 +49,12 @@ public class AgentConfig {
     @Value("${langchain4j.open-ai.chat-model.log-responses:false}")
     private boolean logResponses;
 
+    private final AgentMetricsSink agentMetricsSink;
+
+    public AgentConfig(AgentMetricsSink agentMetricsSink) {
+        this.agentMetricsSink = agentMetricsSink;
+    }
+
     /**
      * 启动 fail-fast：API Key 必须由环境变量 OPENAI_API_KEY 注入。
      * 缺失时直接终止启动，避免拖到首次对话才以 401/模糊错误暴露。
@@ -88,8 +96,9 @@ public class AgentConfig {
                 .timeout(timeout)
                 .logRequests(logRequests)
                 .logResponses(logResponses)
-                // ReAct 日志监听器：控制台打印每一轮 LLM 请求/响应、工具调用
-                .listeners(new ReActLoggerListener())
+                // ReAct 日志监听器（人类可读日志）+ 可观测监听器（trace 采集/指标，带模型标签）
+                .listeners(new ReActLoggerListener(),
+                        new ObservabilityChatModelListener("sync:" + name, agentMetricsSink))
                 .build();
     }
 
@@ -119,8 +128,9 @@ public class AgentConfig {
                 .timeout(timeout)
                 .logRequests(logRequests)
                 .logResponses(logResponses)
-                // 流式模型同样挂 ReAct 监听器：可追踪工具调用循环与生成终止时机
-                .listeners(new ReActLoggerListener())
+                // 流式模型同样挂 ReAct + 可观测监听器：工具循环、token 用量、取消时机均可追踪
+                .listeners(new ReActLoggerListener(),
+                        new ObservabilityChatModelListener("stream:" + name, agentMetricsSink))
                 .build();
     }
 }
