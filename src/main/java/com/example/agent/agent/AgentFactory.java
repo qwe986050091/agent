@@ -13,6 +13,7 @@ import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
 import dev.langchain4j.service.AiServices;
 import dev.langchain4j.service.TokenStream;
+import dev.langchain4j.service.tool.ToolProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -100,7 +101,8 @@ public class AgentFactory {
                                    String message,
                                    String summary,
                                    List<SummarizingChatMemory.HistoryMessage> history,
-                                   List<SkillDefinition> skills) {
+                                   List<SkillDefinition> skills,
+                                   List<String> allowedTools) {
 
         /** 请求级记忆的唯一键：用户 + 会话（多会话互不串上下文；RAG 检索仍按 userId） */
         public String memoryId() {
@@ -139,14 +141,18 @@ public class AgentFactory {
 
     private AgentChatResult doChat(AgentChatRequest request, List<Skill> mountedSkills,
                                    SummarizingChatMemory memory, ChatModel model) {
-        SimpleAgent agent = AiServices.builder(SimpleAgent.class)
+        List<ToolProvider> toolProviders = toolProvidersOf(mountedSkills);
+        AiServices<SimpleAgent> builder = AiServices.builder(SimpleAgent.class)
                 .chatModel(model)
                 .maxToolCallingRoundTrips(maxToolRoundTrips)
                 .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
                 .tools(toolsOf(mountedSkills))
                 .chatMemoryProvider(memoryId -> memory)
-                .contentRetriever(retrieverFor(request.userId()))
-                .build();
+                .contentRetriever(retrieverFor(request.userId()));
+        if (!toolProviders.isEmpty()) {
+            builder.toolProviders(toolProviders.toArray(new ToolProvider[0]));
+        }
+        SimpleAgent agent = builder.build();
 
         String answer = agent.chat(request.memoryId(), request.message());
         return new AgentChatResult(answer == null ? "" : answer, memory.summaryText());
@@ -167,34 +173,44 @@ public class AgentFactory {
     public TokenStream streamChat(AgentChatRequest request,
                                   Consumer<String> onToken,
                                   BiConsumer<String, String> onComplete,
-                                  Consumer<Throwable> onError) {
-        return streamChat(request, streamingChatModel, onToken, onComplete, onError);
+                                  Consumer<Throwable> onError,
+                                  com.example.agent.approval.ApprovalGate gate,
+                                  TraceCollector collector) {
+        return streamChat(request, streamingChatModel, onToken, onComplete, onError, gate, collector);
     }
 
     /**
      * 使用指定流式模型装配 TokenStream（备用模型降级重试用）。
+     * gate/collector 必须由调用方显式传入：fallback 发生在模型 HTTP 回调线程，
+     * 那里没有 ThreadLocal 上下文（R1 评审 F-02 修复）。
      */
     public TokenStream streamChat(AgentChatRequest request,
                                   StreamingChatModel model,
                                   Consumer<String> onToken,
                                   BiConsumer<String, String> onComplete,
-                                  Consumer<Throwable> onError) {
+                                  Consumer<Throwable> onError,
+                                  com.example.agent.approval.ApprovalGate gate,
+                                  TraceCollector collector) {
         List<Skill> mountedSkills = prepare(request);
 
         SummarizingChatMemory memory = restoreMemory(request);
-        // 流式回调在 HTTP 客户端线程执行，ThreadLocal 采集器不可见：
-        // 用请求级装饰器显式绑定当前 collector（采集工具往返/token），能力与元数据透传
-        TraceCollector collector = TraceContextHolder.current();
-        StreamingChatModel effectiveModel = collector == null
-                ? model : new TraceAwareStreamingChatModel(model, collector);
-        StreamingSimpleAgent agent = AiServices.builder(StreamingSimpleAgent.class)
+        // 流式回调在 HTTP 客户端线程执行，ThreadLocal 上下文不可见：
+        // 用请求级装饰器显式绑定 collector 与审批闸门（由 worker 线程的调用方传入）
+        StreamingChatModel effectiveModel = collector == null && gate == null
+                ? model
+                : new TraceAwareStreamingChatModel(model, collector, gate);
+        List<ToolProvider> toolProviders = toolProvidersOf(mountedSkills);
+        AiServices<StreamingSimpleAgent> builder = AiServices.builder(StreamingSimpleAgent.class)
                 .streamingChatModel(effectiveModel)
                 .maxToolCallingRoundTrips(maxToolRoundTrips)
                 .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
                 .tools(toolsOf(mountedSkills))
                 .chatMemoryProvider(memoryId -> memory)
-                .contentRetriever(retrieverFor(request.userId()))
-                .build();
+                .contentRetriever(retrieverFor(request.userId()));
+        if (!toolProviders.isEmpty()) {
+            builder.toolProviders(toolProviders.toArray(new ToolProvider[0]));
+        }
+        StreamingSimpleAgent agent = builder.build();
 
         return agent.chat(request.memoryId(), request.message())
                 .onPartialResponse(onToken)
@@ -218,8 +234,10 @@ public class AgentFactory {
     public TokenStream streamChatFallback(AgentChatRequest request,
                                           Consumer<String> onToken,
                                           BiConsumer<String, String> onComplete,
-                                          Consumer<Throwable> onError) {
-        return streamChat(request, fallbackStreamingChatModel, onToken, onComplete, onError);
+                                          Consumer<Throwable> onError,
+                                          com.example.agent.approval.ApprovalGate gate,
+                                          TraceCollector collector) {
+        return streamChat(request, fallbackStreamingChatModel, onToken, onComplete, onError, gate, collector);
     }
 
     /**
@@ -252,6 +270,18 @@ public class AgentFactory {
             allTools.addAll(skill.tools());
         }
         return allTools.isEmpty() ? new Object[0] : allTools.toArray();
+    }
+
+    /** 从 Skills 收集动态 ToolProvider（MCP 等）；无则空列表 */
+    private List<ToolProvider> toolProvidersOf(List<Skill> mountedSkills) {
+        List<ToolProvider> providers = new ArrayList<>();
+        for (Skill skill : mountedSkills) {
+            ToolProvider provider = skill.toolProvider();
+            if (provider != null) {
+                providers.add(provider);
+            }
+        }
+        return providers;
     }
 
     /**

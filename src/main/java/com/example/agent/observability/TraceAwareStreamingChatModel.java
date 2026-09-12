@@ -1,5 +1,7 @@
 package com.example.agent.observability;
 
+import com.example.agent.approval.ApprovalContextHolder;
+import com.example.agent.approval.ApprovalGate;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
@@ -32,10 +34,18 @@ public class TraceAwareStreamingChatModel implements StreamingChatModel {
 
     private final StreamingChatModel delegate;
     private final TraceCollector collector;
+    /**
+     * 请求级审批闸门。流式工具实际在 HTTP 客户端回调线程执行（见类注释），
+     * 故在每轮 onCompleteResponse（内联工具执行点）前后绑定/清理 ThreadLocal，
+     * 使 @Tool 方法与 MCP 工具包装器能取到审批上下文（SSE 出口/会话授权）。
+     */
+    private final ApprovalGate approvalGate;
 
-    public TraceAwareStreamingChatModel(StreamingChatModel delegate, TraceCollector collector) {
+    public TraceAwareStreamingChatModel(StreamingChatModel delegate, TraceCollector collector,
+                                        ApprovalGate approvalGate) {
         this.delegate = delegate;
         this.collector = collector;
+        this.approvalGate = approvalGate;
     }
 
     @Override
@@ -119,7 +129,23 @@ public class TraceAwareStreamingChatModel implements StreamingChatModel {
                 } catch (Exception ignored) {
                     // 采集异常不影响答案回传
                 }
-                original.onCompleteResponse(response);
+                // 工具在本回调线程内联执行：绑定请求级审批上下文，执行完立即清理
+                // （工具线程可能阻塞等待用户审批，期间占用模型 HTTP 回调线程，属预期内）
+                ApprovalGate previous = ApprovalContextHolder.current();
+                if (approvalGate != null) {
+                    ApprovalContextHolder.start(approvalGate);
+                }
+                try {
+                    original.onCompleteResponse(response);
+                } finally {
+                    if (approvalGate != null) {
+                        if (previous != null) {
+                            ApprovalContextHolder.start(previous);
+                        } else {
+                            ApprovalContextHolder.clear();
+                        }
+                    }
+                }
             }
 
             @Override

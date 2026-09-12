@@ -32,6 +32,40 @@ agent:
     # 单次对话中工具调用（含"模型→工具→模型"完整往返）的最大轮次；
     # 超限后强制收敛为一条提示（库默认 100 太高，易被死循环 prompt 烧 token）
     max-tool-round-trips: 15
+  # ===== 高危工具人工确认（human-in-the-loop） =====
+  approval:
+    # 前端审批弹窗等待时长（秒）；超时高危操作自动拒绝。必须小于 SSE 总超时 5 分钟
+    timeout-seconds: 60
+  # ===== 联网工具（内置技能 web / http-api） =====
+  tools:
+    web:
+      enabled: true                    # false 时不注册搜索/抓取工具 Bean
+      # 免 Key 搜索 Provider 顺序：国内生产优先 cn.bing.com，失败回退 DuckDuckGo
+      search-providers: bing,duckduckgo
+      connect-timeout: 5s
+      read-timeout: 10s
+      max-body-bytes: 2097152          # 响应体下载上限 2MB，超出截断
+      max-text-chars: 8000             # 返回给模型的文本上限（字符）
+      search-default-results: 5
+      search-max-results: 10
+    http:
+      enabled: true                    # false 时不注册通用 HTTP 工具 Bean
+  # ===== MCP（Model Context Protocol）外部工具生态 =====
+  # 默认空列表：功能休眠。配置后每个 server 生成内置技能 mcp:{name}，用户挂载后其工具动态可用。
+  mcp:
+    servers: []
+    # Streamable HTTP 示例：
+    # - name: everything
+    #   transport: http                 # http = Streamable HTTP；stdio = 本地子进程
+    #   url: http://127.0.0.1:3001/mcp
+    #   approval: confirm               # confirm（默认，每次人工确认）| auto（仅可信内网 server）
+    #   description: MCP everything 示例
+    # stdio 示例（服务器需装有 node/npx 等运行时）：
+    # - name: fs
+    #   transport: stdio
+    #   command: ["npx", "-y", "@modelcontextprotocol/server-everything"]
+    #   environment: {}
+    #   approval: confirm
 
 # ===== LangChain4j 配置 =====
 # 支持 OpenAI、Azure OpenAI、以及任意 OpenAI 兼容接口（如 DeepSeek、通义千问、Kimi、Ollama 等）

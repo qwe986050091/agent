@@ -1,5 +1,7 @@
 package com.example.agent.skill;
 
+import dev.langchain4j.service.tool.ToolProvider;
+
 import java.util.List;
 
 /**
@@ -31,4 +33,12 @@ public interface Skill {
 
     /** 该技能包含的 Tool 对象列表（@Tool 注解的类实例） */
     List<Object> tools();
+
+    /**
+     * 可选：动态工具提供者（如 MCP Server 运行时发现的工具）。
+     * 默认 null；非 null 时 AgentFactory 将其注册进本次 AiServices。
+     */
+    default ToolProvider toolProvider() {
+        return null;
+    }
 }

@@ -2,6 +2,11 @@ package com.example.agent.controller;
 
 import com.example.agent.agent.AgentFactory;
 import com.example.agent.agent.SummarizingChatMemory;
+import com.example.agent.approval.ApprovalContextHolder;
+import com.example.agent.approval.ApprovalDeniedException;
+import com.example.agent.approval.ApprovalGate;
+import com.example.agent.approval.ApprovalRegistry;
+import com.example.agent.approval.ApprovalRequest;
 import com.example.agent.observability.AgentMetricsSink;
 import com.example.agent.observability.TraceCollector;
 import com.example.agent.observability.TraceContextHolder;
@@ -9,7 +14,9 @@ import com.example.agent.observability.TraceMdcFilter;
 import com.example.agent.observability.model.ToolTraceEvent;
 import com.example.agent.observability.model.TraceEvent;
 import com.example.agent.observability.model.UsageTraceEvent;
+import com.example.agent.skill.Skill;
 import com.example.agent.skill.SkillDefinition;
+import com.example.agent.skill.SkillManager;
 import com.example.agent.tools.ToolRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.service.TokenStream;
@@ -24,8 +31,10 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -84,14 +93,24 @@ public class AgentController {
 
     private final AgentFactory agentFactory;
     private final ToolRegistry toolRegistry;
+    private final SkillManager skillManager;
     private final AgentMetricsSink metrics;
+    private final ApprovalRegistry approvalRegistry;
+
+    /** 高危工具审批等待时长（agent.approval.timeout-seconds），超时自动拒绝 */
+    @org.springframework.beans.factory.annotation.Value("${agent.approval.timeout-seconds:60}")
+    private long approvalTimeoutSeconds;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public AgentController(AgentFactory agentFactory, ToolRegistry toolRegistry,
-                           AgentMetricsSink metrics) {
+                           SkillManager skillManager,
+                           AgentMetricsSink metrics, ApprovalRegistry approvalRegistry) {
         this.agentFactory = agentFactory;
         this.toolRegistry = toolRegistry;
+        this.skillManager = skillManager;
         this.metrics = metrics;
+        this.approvalRegistry = approvalRegistry;
     }
 
     // ==================== 对话接口 ====================
@@ -102,9 +121,9 @@ public class AgentController {
                                      @RequestParam String message) {
         ResponseEntity<?> bad = requireMessage(message);
         if (bad != null) return bad;
-        // GET 便捷入口：不带历史/技能，纯无状态对话（默认会话 0）
+        // GET 便捷入口：不带历史/技能，纯无状态对话（默认会话 0，无会话级工具授权）
         AgentFactory.AgentChatRequest req =
-                new AgentFactory.AgentChatRequest(userId, 0L, message, null, List.of(), List.of());
+                new AgentFactory.AgentChatRequest(userId, 0L, message, null, List.of(), List.of(), List.of());
         return runChat(req, traceIdOf(httpRequest));
     }
 
@@ -123,6 +142,10 @@ public class AgentController {
         // 同步对话整条 AiServices 链在 Tomcat 线程执行：直接在当前线程开启采集
         TraceCollector collector = TraceContextHolder.start(
                 traceId, req.userId(), req.conversationId(), null, metrics);
+        // 同步通道无 SSE 确认出口：gate 存在但 sink=null，高危工具一律自动拒绝
+        ApprovalContextHolder.start(new ApprovalGate(
+                approvalRegistry, approvalTimeoutSeconds, req.userId(), req.conversationId(), traceId,
+                req.allowedTools() == null ? Set.of() : new HashSet<>(req.allowedTools()), null));
         long start = System.nanoTime();
         try {
             AgentFactory.AgentChatResult result;
@@ -147,6 +170,7 @@ public class AgentController {
             metrics.recordChat("sync", "success", elapsedMs(start));
             return ResponseEntity.ok(buildResponse(req, collector, result.answer(), result.summary()));
         } finally {
+            ApprovalContextHolder.clear();
             TraceContextHolder.clear();
         }
     }
@@ -171,6 +195,7 @@ public class AgentController {
      *   event: tool  data: {...}   ← 工具调用（参数/结果/成败/耗时）
      *   event: rag   data: {...}   ← RAG 召回片段（来源/文本/相似度）
      *   event: usage data: {...}   ← 整轮聚合 token 用量/模型/轮次/耗时
+     *   event: approval-request    ← 高危工具执行前请求用户确认（工具线程阻塞等待决策）
      *   event: memory data: {...}  ← 回合摘要（backend 落库用，不转发前端）
      *   data: [DONE]               ← 结束标记
      */
@@ -190,6 +215,8 @@ public class AgentController {
         // 请求级取消状态：客户端断开/超时 → 置位并中断流式执行线程，让 LLM 生成真正终止
         AtomicBoolean cancelled = new AtomicBoolean(false);
         AtomicReference<Thread> streamThread = new AtomicReference<>();
+        // 审批闸门引用（工作线程创建后回填）：断连/超时/完成时拒绝全部待审批，工具线程不悬挂
+        AtomicReference<ApprovalGate> gateRef = new AtomicReference<>();
 
         String traceId = traceIdOf(httpRequest);
         long acceptedAt = System.nanoTime();
@@ -197,6 +224,8 @@ public class AgentController {
         emitter.onTimeout(() -> {
             log.warn("[chatStream] SSE 超过 {}ms 未完成，主动断开并取消生成", SSE_TIMEOUT_MS);
             cancelled.set(true);
+            ApprovalGate gate = gateRef.get();
+            if (gate != null) gate.denyAllPending();
             Thread t = streamThread.get();
             if (t != null) t.interrupt();
             emitter.completeWithError(new TimeoutException("响应超时，请重试"));
@@ -206,12 +235,16 @@ public class AgentController {
             log.warn("[chatStream] SSE 连接异常（{}），取消生成",
                     e == null ? "客户端断开" : e.getMessage());
             cancelled.set(true);
+            ApprovalGate gate = gateRef.get();
+            if (gate != null) gate.denyAllPending();
             Thread t = streamThread.get();
             if (t != null) t.interrupt();
         });
         emitter.onCompletion(() -> {
             // 正常结束（complete 已由流线程调用）；兜底置位，避免任何残留回调继续发送
             cancelled.set(true);
+            ApprovalGate gate = gateRef.get();
+            if (gate != null) gate.denyAllPending();
         });
 
         final AgentFactory.AgentChatRequest req;
@@ -223,7 +256,7 @@ public class AgentController {
 
         try {
             metrics.changeSseActive(+1);
-            streamExecutor.execute(() -> runStream(req, emitter, cancelled, streamThread, traceId));
+            streamExecutor.execute(() -> runStream(req, emitter, cancelled, streamThread, gateRef, traceId));
         } catch (RejectedExecutionException e) {
             // 线程池/队列已满：快速失败，不排队堆积
             metrics.changeSseActive(-1);
@@ -248,17 +281,40 @@ public class AgentController {
      */
     private void runStream(AgentFactory.AgentChatRequest req, SseEmitter emitter,
                            AtomicBoolean cancelled, AtomicReference<Thread> streamThread,
-                           String traceId) {
+                           AtomicReference<ApprovalGate> gateRef, String traceId) {
         streamThread.set(Thread.currentThread());
         TraceCollector collector = TraceContextHolder.start(
                 traceId, req.userId(), req.conversationId(),
                 event -> emitTraceEvent(emitter, cancelled, event), metrics);
+        // 请求级审批闸门：sink 把审批请求实时发为 SSE 命名事件，@Tool 方法在本工作线程内阻塞等决策
+        ApprovalGate gate = new ApprovalGate(
+                approvalRegistry, approvalTimeoutSeconds, req.userId(), req.conversationId(), traceId,
+                req.allowedTools() == null ? Set.of() : new HashSet<>(req.allowedTools()),
+                approvalRequest -> emitApprovalRequest(emitter, cancelled, approvalRequest));
+        gateRef.set(gate);
+        ApprovalContextHolder.start(gate);
         long start = System.nanoTime();
         try {
-            runStreamWithModel(req, emitter, cancelled, collector, false, start);
+            runStreamWithModel(req, emitter, cancelled, collector, false, start, gate);
         } finally {
+            ApprovalContextHolder.clear();
             TraceContextHolder.clear();
             metrics.changeSseActive(-1);
+        }
+    }
+
+    /** 发送高危工具审批请求事件（approval-request）；连接已取消/发送失败时抛异常阻止工具继续 */
+    private void emitApprovalRequest(SseEmitter emitter, AtomicBoolean cancelled,
+                                     ApprovalRequest approvalRequest) {
+        if (cancelled.get()) {
+            throw new ApprovalDeniedException("连接已取消，审批请求无法下发");
+        }
+        try {
+            emitter.send(SseEmitter.event()
+                    .name("approval-request")
+                    .data(objectMapper.writeValueAsString(approvalRequest), MediaType.APPLICATION_JSON));
+        } catch (IOException e) {
+            throw new ApprovalDeniedException("审批请求下发失败（连接可能已断开）");
         }
     }
 
@@ -271,7 +327,7 @@ public class AgentController {
      */
     private void runStreamWithModel(AgentFactory.AgentChatRequest req, SseEmitter emitter,
                                     AtomicBoolean cancelled, TraceCollector collector,
-                                    boolean useFallback, long start) {
+                                    boolean useFallback, long start, ApprovalGate gate) {
         if (useFallback) {
             // 重放前清空首轮 trace 并通知 backend/前端 reset（工具可能已在首轮真实执行）
             collector.prepareForFallback();
@@ -327,17 +383,18 @@ public class AgentController {
             // 异常（TokenStream 回调路径）
             Consumer<Throwable> onError = error -> handleStreamFailure(
                     req, emitter, cancelled, emitted, fallbackUsed, collector, useFallback,
-                    error, start, recordOutcome);
+                    error, start, recordOutcome, gate);
 
-            // 主模型失败且未输出 → 用备用模型重跑（入口由 useFallback 决定）
+            // 主模型失败且未输出 → 用备用模型重跑（入口由 useFallback 决定）；
+            // gate/collector 显式传入：本路径可能运行在模型回调线程，ThreadLocal 不可靠
             TokenStream ts = useFallback
-                    ? agentFactory.streamChatFallback(req, onToken, onComplete, onError)
-                    : agentFactory.streamChat(req, onToken, onComplete, onError);
+                    ? agentFactory.streamChatFallback(req, onToken, onComplete, onError, gate, collector)
+                    : agentFactory.streamChat(req, onToken, onComplete, onError, gate, collector);
             ts.start();
         } catch (Exception e) {
             // start() 抛出的异常（请求构造/启动阶段失败，如模型不可用）
             handleStreamFailure(req, emitter, cancelled, emitted, fallbackUsed, collector,
-                    useFallback, e, start, recordOutcome);
+                    useFallback, e, start, recordOutcome, gate);
         } finally {
             if (cancelled.get()) {
                 log.info("[chatStream] 流式生成已终止（客户端取消）");
@@ -350,7 +407,7 @@ public class AgentController {
                                      AtomicBoolean cancelled, AtomicBoolean emitted,
                                      AtomicBoolean fallbackUsed, TraceCollector collector,
                                      boolean useFallback, Throwable error, long start,
-                                     Consumer<String> recordOutcome) {
+                                     Consumer<String> recordOutcome, ApprovalGate gate) {
         if (cancelled.get()) {
             // 用户主动停止：静默结束，不补发错误事件（连接通常已断）
             recordOutcome.accept("cancelled");
@@ -368,7 +425,7 @@ public class AgentController {
         }
         if (!emitted.get() && !fallbackUsed.getAndSet(true)) {
             log.warn("[chatStream] 主模型流式失败（未开始输出），降级备用模型重试: {}", error.getMessage());
-            runStreamWithModel(req, emitter, cancelled, collector, true, start);
+            runStreamWithModel(req, emitter, cancelled, collector, true, start, gate);
             return;
         }
         log.error("[chatStream] 流式对话出错: {}", error.getMessage());
@@ -428,6 +485,23 @@ public class AgentController {
         return ResponseEntity.ok(java.util.Map.of("tools", toolRegistry.getAllToolNames()));
     }
 
+    /**
+     * 内置技能目录（静态内置 + MCP 动态 mcp:{server}）。
+     * backend 启动时据此同步 skill 表（upsert 内置行、清理已下线 mcp:* 行）。
+     */
+    @GetMapping("/skills/catalog")
+    public ResponseEntity<?> skillCatalog() {
+        List<Map<String, Object>> skills = new java.util.ArrayList<>();
+        for (Skill skill : skillManager.listBuiltin()) {
+            Map<String, Object> item = new java.util.HashMap<>();
+            item.put("name", skill.name());
+            item.put("shortDescription", skill.shortDescription());
+            item.put("builtin", true);
+            skills.add(item);
+        }
+        return ResponseEntity.ok(Map.of("skills", skills));
+    }
+
     // ==================== 入参校验 ====================
 
     private ResponseEntity<?> requireMessage(String message) {
@@ -457,6 +531,8 @@ public class AgentController {
         private List<HistoryMessage> history;
         /** 该用户已挂载的 Skill 定义（内置技能可只填 name） */
         private List<SkillDefinition> skills;
+        /** 会话级已授权免确认的工具名（backend 从 Redis 授权集合下发） */
+        private List<String> allowedTools;
 
         public ChatRequest() {}
 
@@ -474,6 +550,9 @@ public class AgentController {
             if (skills == null) {
                 skills = List.of();
             }
+            if (allowedTools == null) {
+                allowedTools = List.of();
+            }
         }
 
         public AgentFactory.AgentChatRequest toAgentRequest() {
@@ -481,7 +560,8 @@ public class AgentController {
                     .filter(h -> h != null && h.getRole() != null && h.getContent() != null)
                     .map(h -> new SummarizingChatMemory.HistoryMessage(h.getRole(), h.getContent()))
                     .toList();
-            return new AgentFactory.AgentChatRequest(userId, conversationId, message, summary, hist, skills);
+            return new AgentFactory.AgentChatRequest(userId, conversationId, message, summary,
+                    hist, skills, allowedTools);
         }
 
         public String getUserId() { return userId; }
@@ -496,6 +576,8 @@ public class AgentController {
         public void setHistory(List<HistoryMessage> history) { this.history = history; }
         public List<SkillDefinition> getSkills() { return skills; }
         public void setSkills(List<SkillDefinition> skills) { this.skills = skills; }
+        public List<String> getAllowedTools() { return allowedTools; }
+        public void setAllowedTools(List<String> allowedTools) { this.allowedTools = allowedTools; }
     }
 
     public static class HistoryMessage {

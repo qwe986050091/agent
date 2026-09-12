@@ -37,10 +37,15 @@ public class SkillManager {
 
     private final ToolRegistry toolRegistry;
 
-    public SkillManager(List<Skill> builtinSkillBeans, ToolRegistry toolRegistry) {
+    public SkillManager(List<Skill> builtinSkillBeans, ToolRegistry toolRegistry,
+                        com.example.agent.mcp.McpClientManager mcpClientManager) {
         this.toolRegistry = toolRegistry;
         for (Skill skill : builtinSkillBeans) {
             builtinSkills.put(skill.name(), skill);
+        }
+        // MCP 动态内置技能（mcp:{server}）；无配置时为空，行为零变化
+        for (Skill mcpSkill : mcpClientManager.skills()) {
+            builtinSkills.put(mcpSkill.name(), mcpSkill);
         }
     }
 
