@@ -47,6 +47,7 @@ public class MicrometerAgentMetrics implements AgentMetricsSink {
             if (durationMs >= 0) {
                 Timer.builder("agent.llm.duration")
                         .tags("model", safeTag(model), "outcome", outcome)
+                        .publishPercentileHistogram(true)
                         .register(registry)
                         .record(durationMs, TimeUnit.MILLISECONDS);
             }
@@ -68,6 +69,7 @@ public class MicrometerAgentMetrics implements AgentMetricsSink {
             if (durationMs >= 0) {
                 Timer.builder("agent.tool.duration")
                         .tags("name", safeTag(toolName), "outcome", outcome)
+                        .publishPercentileHistogram(true)
                         .register(registry)
                         .record(durationMs, TimeUnit.MILLISECONDS);
             }
@@ -94,6 +96,7 @@ public class MicrometerAgentMetrics implements AgentMetricsSink {
             }
             Timer.builder("agent.chat.duration")
                     .tags("mode", safeTag(mode), "outcome", safeTag(outcome))
+                    .publishPercentileHistogram(true)
                     .register(registry)
                     .record(durationMs, TimeUnit.MILLISECONDS);
         });
