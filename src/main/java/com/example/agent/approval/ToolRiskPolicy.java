@@ -38,7 +38,9 @@ public final class ToolRiskPolicy {
             Map.entry("webSearch", Policy.auto("联网搜索")),
             Map.entry("fetchWebPage", Policy.confirm("medium", "抓取网页内容")),
             // 任意 HTTP 请求：高危
-            Map.entry("sendHttpRequest", Policy.confirm("high", "发起 HTTP 请求")));
+            Map.entry("sendHttpRequest", Policy.confirm("high", "发起 HTTP 请求")),
+            // 沙箱执行任意 Python 代码：高危（即便有容器隔离，仍需逐次确认）
+            Map.entry("executePython", Policy.confirm("high", "执行 Python 代码")));
 
     /** 未知工具的兜底策略：高危 + 必须确认 */
     private static final Policy DEFAULT_POLICY = Policy.confirm("high", "执行工具");

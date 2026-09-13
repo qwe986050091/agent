@@ -50,6 +50,23 @@ agent:
       search-max-results: 10
     http:
       enabled: true                    # false 时不注册通用 HTTP 工具 Bean
+    # ===== 代码执行沙箱（内置技能 code-runner，P1-6.3） =====
+    code:
+      enabled: ${AGENT_TOOLS_CODE_ENABLED:false}   # 默认休眠；生产经 systemd Environment=true 开启
+      # auto=Linux 强制 systemd-run 沙箱（非 Linux 回退无隔离 direct 仅供本地开发）；
+      # systemd=仅沙箱（非 Linux 启动失败）；direct=本机直跑 Python，无任何隔离，禁止生产使用
+      runtime: auto
+      timeout-seconds: 30              # 单次执行上限：systemd RuntimeMaxSec 杀整个 cgroup，Java 再 +10s 兜底
+      memory-max: 256M                 # cgroup 内存上限，超出内核 OOM 终止
+      cpu-quota: 100                   # CPU 配额百分比（100 = 1 核）
+      tasks-max: 64                    # 进程/线程数上限（防 fork 炸弹）
+      max-concurrency: 1               # 同时执行的沙箱任务数（信号量限流，满载直接友好提示）
+      max-output-chars: 8000           # stdout/stderr 合并输出上限（字符）
+      # 临时脚本目录；非 root 的 sudo wrapper 模式须与 wrapper 内白名单目录一致
+      work-dir: ${CODE_SANDBOX_DIR:data/sandbox}
+      # 非 root 运行时的 sudo wrapper（安全参数在 wrapper 内固定，sudoers 仅放行该脚本）
+      sudo-wrapper: ${CODE_SANDBOX_WRAPPER:/opt/agent-sandbox/run-sandbox}
+      python-command: ${CODE_PYTHON:}  # direct 模式解释器；留空=Linux /usr/bin/python3、其他平台 python
   # ===== MCP（Model Context Protocol）外部工具生态 =====
   # 默认空列表：功能休眠。配置后每个 server 生成内置技能 mcp:{name}，用户挂载后其工具动态可用。
   mcp:

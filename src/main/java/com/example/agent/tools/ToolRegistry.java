@@ -1,5 +1,6 @@
 package com.example.agent.tools;
 
+import com.example.agent.tools.code.CodeExecutionTools;
 import com.example.agent.tools.web.HttpRequestTools;
 import com.example.agent.tools.web.WebFetchTools;
 import com.example.agent.tools.web.WebSearchTools;
@@ -29,14 +30,17 @@ public class ToolRegistry {
                         DateTimeTools dateTimeTools,
                         ObjectProvider<WebSearchTools> webSearchTools,
                         ObjectProvider<WebFetchTools> webFetchTools,
-                        ObjectProvider<HttpRequestTools> httpRequestTools) {
+                        ObjectProvider<HttpRequestTools> httpRequestTools,
+                        ObjectProvider<CodeExecutionTools> codeExecutionTools) {
         // 注册内置 Tool，key 为类名首字母小写
         register("calculatorTools", calculatorTools);
         register("dateTimeTools", dateTimeTools);
         webSearchTools.ifAvailable(t -> register("webSearchTools", t));
         webFetchTools.ifAvailable(t -> register("webFetchTools", t));
         httpRequestTools.ifAvailable(t -> register("httpRequestTools", t));
-    }
+        // 代码执行沙箱：agent.tools.code.enabled=false（默认）时 Bean 不存在，不注册
+        codeExecutionTools.ifAvailable(t -> register("codeExecutionTools", t));
+}
 
     /** 注册一个 Tool */
     public void register(String name, Object tool) {
