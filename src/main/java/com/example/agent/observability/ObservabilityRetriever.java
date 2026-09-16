@@ -64,12 +64,18 @@ public class ObservabilityRetriever implements ContentRetriever {
                 String type = md == null ? null : md.getString(RagService.META_TYPE);
                 double score = md != null && md.containsKey(RagService.META_SCORE)
                         ? roundScore(md.getDouble(RagService.META_SCORE)) : 0d;
+                String channel = md != null && md.containsKey(RagService.META_CHANNEL)
+                        ? md.getString(RagService.META_CHANNEL) : "vector";
+                Double rerankScore = md != null && md.containsKey(RagService.META_RERANK_SCORE)
+                        ? roundScore(md.getDouble(RagService.META_RERANK_SCORE)) : null;
                 segments.add(new RagSegment(
                         docId,
                         source == null ? "" : source,
                         type == null ? "" : type,
                         TraceCollector.truncate(ts.text(), TraceCollector.MAX_SEGMENT_TEXT),
-                        score));
+                        score,
+                        channel,
+                        rerankScore));
             } catch (Exception e) {
                 log.debug("[Trace] 召回片段转换失败，跳过: {}", e.getMessage());
             }

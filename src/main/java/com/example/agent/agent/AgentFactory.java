@@ -4,7 +4,9 @@ import com.example.agent.observability.ObservabilityRetriever;
 import com.example.agent.observability.TraceAwareStreamingChatModel;
 import com.example.agent.observability.TraceCollector;
 import com.example.agent.observability.TraceContextHolder;
+import com.example.agent.rag.NumberedCitationContentInjector;
 import com.example.agent.rag.RagService;
+import dev.langchain4j.rag.DefaultRetrievalAugmentor;
 import com.example.agent.skill.Skill;
 import com.example.agent.skill.SkillDefinition;
 import com.example.agent.skill.SkillManager;
@@ -148,7 +150,10 @@ public class AgentFactory {
                 .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
                 .tools(toolsOf(mountedSkills))
                 .chatMemoryProvider(memoryId -> memory)
-                .contentRetriever(retrieverFor(request.userId()));
+                .retrievalAugmentor(DefaultRetrievalAugmentor.builder()
+                        .contentRetriever(retrieverFor(request.userId()))
+                        .contentInjector(new NumberedCitationContentInjector())
+                        .build());
         if (!toolProviders.isEmpty()) {
             builder.toolProviders(toolProviders.toArray(new ToolProvider[0]));
         }
@@ -206,7 +211,10 @@ public class AgentFactory {
                 .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
                 .tools(toolsOf(mountedSkills))
                 .chatMemoryProvider(memoryId -> memory)
-                .contentRetriever(retrieverFor(request.userId()));
+                .retrievalAugmentor(DefaultRetrievalAugmentor.builder()
+                        .contentRetriever(retrieverFor(request.userId()))
+                        .contentInjector(new NumberedCitationContentInjector())
+                        .build());
         if (!toolProviders.isEmpty()) {
             builder.toolProviders(toolProviders.toArray(new ToolProvider[0]));
         }

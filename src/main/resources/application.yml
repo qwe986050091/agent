@@ -20,6 +20,11 @@ management:
 spring:
   application:
     name: simple-agent
+  # 知识库文档上传（P1-9.2：PDF/Word/Excel 等二进制文档，backend 转发原始字节）
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 22MB
 
 # ===== 服务间鉴权 =====
 # backend 调用 agent 时必须携带请求头 X-Agent-Token，值与此处一致
@@ -116,13 +121,42 @@ langchain4j:
 # 使用本地进程内 Embedding 模型（bge-small-zh-v1.5 量化版，ONNX），无需外部 API Key
 rag:
   enabled: true              # 置 false 可完全关闭 RAG（对话不受影响）
-  # 向量库快照文件（相对服务 WorkingDirectory；启动自动加载，写入后防抖异步落盘，重启不丢索引）
+  # 向量存储模式：memory=进程内 InMemory + JSON 快照（本地默认）；
+  #              pgvector=PostgreSQL+pgvector 外置（生产，内存有界/多实例共享，P1-9.1）
+  store: ${RAG_STORE:memory}
+  # memory 模式的向量快照文件（相对服务 WorkingDirectory；启动加载、写入后防抖异步落盘）
   store-file: data/rag-embeddings.json
+  # ===== pgvector 模式连接配置（仅 store=pgvector 时生效；生产经 systemd 环境变量注入） =====
+  pgvector:
+    host: ${RAG_PG_HOST:127.0.0.1}
+    port: ${RAG_PG_PORT:5432}
+    database: ${RAG_PG_DATABASE:agent_rag}
+    table: rag_embeddings
+    user: ${RAG_PG_USER:agent_rag}
+    password: ${RAG_PG_PASSWORD:}   # 缺失时启动 fail-fast（与 API key/DB 密码同约定）
+    dimension: 512                  # bge-small-zh-v1.5 向量维度，换模型必须同步改
+    # 首次 pgvector 启动时，把旧 JSON 快照一次性迁入 PG（PG 为空才执行，成功后快照归档）
+    migrate-snapshot: true
   chunk-size: 500            # 文档切块：每段最大字符数（中文按字符计）
   chunk-overlap: 50          # 相邻块重叠字符数，避免语义被切断
+  # ===== 二进制文档解析（Tika，P1-9.2） =====
+  parse:
+    max-text-chars: 500000   # 抽出正文上限 50 万字，超出判定失败（防解析炸弹）
+    timeout-seconds: 60      # 单文档解析墙钟超时，超时中断
+    threads: 2               # 解析线程池大小（有界队列 8，满载 503）
   search:
-    max-results: 4           # 每次检索最多召回片段数
-    min-score: 0.5           # 相似度下限（0~1），低于此值不注入上下文
+    max-results: 4           # 最终注入上下文的片段数（融合/精排之后）
+    min-score: 0.5           # 纯向量模式相似度下限（0~1）
+    candidate-min-score: 0.3 # 混合/精排模式向量粗召下限（放宽以扩大候选，再交 RRF/Rerank 精选）
+    vector-top-k: 10         # 向量粗召条数
+    keyword-top-k: 10        # 关键词粗召条数（仅 pgvector + hybrid=true）
+    hybrid: true             # 双路召回（向量+pg_trgm 关键词）；memory 模式自动退化为纯向量
+  # ===== Rerank 精排（P1-9.3）：默认休眠，跑 reranker-setup.sh 下模型并置 enabled=true =====
+  rerank:
+    enabled: ${RAG_RERANK_ENABLED:false}
+    model-dir: ${RAG_RERANK_DIR:/opt/agent-data/models/bge-reranker-base}
+    model-file: model_quantized.onnx
+    tokenizer-file: tokenizer.json
 
 # ===== 日志配置 =====
 logging:

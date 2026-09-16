@@ -87,6 +87,27 @@
             <artifactId>langchain4j-mcp</artifactId>
         </dependency>
 
+        <!-- 文档解析（P1-9.2）：Apache Tika 封装，支持 PDF / Word / Excel / PPT / HTML 等
+             二进制文档抽正文；版本由 langchain4j BOM 管理 -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-document-parser-apache-tika</artifactId>
+        </dependency>
+
+        <!-- PGVector 向量库（P1-9.1）：向量落 PostgreSQL，替代 InMemory+JSON 快照；
+             beta 版本轨，与核心/mcp 同 release train（BOM 管理） -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-pgvector</artifactId>
+        </dependency>
+
+        <!-- Rerank 精排模型（P1-9.3）：进程内 ONNX Cross-Encoder（bge-reranker 量化模型），
+             粗召后对 query-片段 成对打分重排；模型文件外部挂载，缺文件时 RAG 自动降级 -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-onnx-scoring</artifactId>
+        </dependency>
+
         <!-- HTML 解析：联网搜索结果解析 + 网页正文提取 -->
         <dependency>
             <groupId>org.jsoup</groupId>

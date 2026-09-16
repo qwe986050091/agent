@@ -9,11 +9,7 @@ import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.embedding.onnx.bgesmallzhv15q.BgeSmallZhV15QuantizedEmbeddingModel;
 import dev.langchain4j.model.output.Response;
-import dev.langchain4j.rag.content.Content;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
-import dev.langchain4j.store.embedding.EmbeddingMatch;
-import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
-import dev.langchain4j.store.embedding.EmbeddingSearchResult;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import dev.langchain4j.store.embedding.filter.MetadataFilterBuilder;
 import dev.langchain4j.store.embedding.inmemory.InMemoryEmbeddingStore;
@@ -59,16 +55,28 @@ public class RagService {
     /** 片段 metadata 键：来源名 / 文档ID */
     public static final String META_SOURCE = "source";
     public static final String META_DOC_ID = "docId";
+    /** 片段 metadata 键：片段在源文档内的序号（从 0 起，引用定位用，P1-9.4） */
+    public static final String META_CHUNK_INDEX = "chunkIndex";
     /** 片段 metadata 键：检索时的向量相似度分数（检索阶段临时写入副本，供观测采集读取，不落快照） */
     public static final String META_SCORE = "_score";
+    /** 片段 metadata 键：命中通道 vector/keyword/both（混合检索，P1-9.3，临时写入副本） */
+    public static final String META_CHANNEL = "_channel";
+    /** 片段 metadata 键：Rerank 精排分（raw logit，P1-9.3，临时写入副本） */
+    public static final String META_RERANK_SCORE = "_rerankScore";
 
     private final EmbeddingStore<TextSegment> embeddingStore;
     /** 向量快照文件路径（null 表示不落盘） */
     private final Path storeFile;
     private final int chunkSize;
     private final int chunkOverlap;
-    private final int maxResults;
-    private final double minScore;
+    /** 检索参数（粗召条数/阈值/融合开关/最终条数，P1-9.3） */
+    private final RagSearchProperties searchProperties;
+    /** 二进制文档（PDF/Word/Excel/…）正文抽取器（P1-9.2） */
+    private final DocumentTextExtractor textExtractor;
+    /** 关键词粗召（仅 pgvector 模式由 RagConfig 注入；memory 模式为 null） */
+    private final KeywordSearcher keywordSearcher;
+    /** Rerank 精排（组件始终在，模型默认休眠，见 {@link RerankScorer}） */
+    private final RerankScorer rerankScorer;
 
     /** ONNX 模型懒加载句柄 */
     private volatile EmbeddingModel embeddingModel;
@@ -88,13 +96,18 @@ public class RagService {
     public RagService(EmbeddingStore<TextSegment> embeddingStore,
                       Path storeFile,
                       int chunkSize, int chunkOverlap,
-                      int maxResults, double minScore) {
+                      RagSearchProperties searchProperties,
+                      DocumentTextExtractor textExtractor,
+                      KeywordSearcher keywordSearcher,
+                      RerankScorer rerankScorer) {
         this.embeddingStore = embeddingStore;
         this.storeFile = storeFile;
         this.chunkSize = chunkSize;
         this.chunkOverlap = chunkOverlap;
-        this.maxResults = maxResults;
-        this.minScore = minScore;
+        this.searchProperties = searchProperties;
+        this.textExtractor = textExtractor;
+        this.keywordSearcher = keywordSearcher;
+        this.rerankScorer = rerankScorer;
     }
 
     /** RAG 当前是否可用（触发懒加载） */
@@ -109,7 +122,35 @@ public class RagService {
      */
     public int indexDocument(String userId, String docId, String sourceName, String text) {
         EmbeddingModel model = requireModel();
-        Document document = Document.from(text == null ? "" : text);
+        int chunks = splitAndStore(model, userId, docId, sourceName, text == null ? "" : text);
+        log.info("[RAG] 用户 {} 文档《{}》索引完成，共 {} 个片段", userId, sourceName, chunks);
+        return chunks;
+    }
+
+    /**
+     * 索引一个二进制文档（PDF/Word/Excel/PPT/HTML…，P1-9.2）：
+     * Tika 抽取正文 → 切块 → 向量化 → 入库。
+     *
+     * @param fileName 原始文件名（带后缀，供 Tika 探测格式）
+     * @param content  文件原始字节
+     * @return 实际写入的片段（块）数
+     * @throws DocumentTextExtractor.DocumentParseException 不受支持/加密/损坏/空文本/超限/超时
+     * @throws DocumentTextExtractor.ParseBusyException      解析线程池满载
+     */
+    public int indexFile(String userId, String docId, String sourceName,
+                         String fileName, byte[] content) {
+        // 先抽取正文：格式/加密/损坏/超限类问题在向量化之前就拒绝，避免白跑模型
+        String text = textExtractor.extract(fileName, content == null ? new byte[0] : content);
+        EmbeddingModel model = requireModel();
+        int chunks = splitAndStore(model, userId, docId, sourceName, text);
+        log.info("[RAG] 用户 {} 文件《{}》解析+索引完成，共 {} 个片段", userId, sourceName, chunks);
+        return chunks;
+    }
+
+    /** 正文切块、写入片段 metadata（含 chunkIndex）、向量化入库并触发快照 */
+    private int splitAndStore(EmbeddingModel model, String userId, String docId,
+                              String sourceName, String text) {
+        Document document = Document.from(text);
         DocumentSplitter splitter = DocumentSplitters.recursive(chunkSize, chunkOverlap);
         List<TextSegment> rawSegments = splitter.split(document);
 
@@ -119,11 +160,11 @@ public class RagService {
                     .put(META_USER_ID, userId)
                     .put(META_TYPE, TYPE_DOCUMENT)
                     .put(META_DOC_ID, docId)
+                    .put(META_CHUNK_INDEX, i)
                     .put(META_SOURCE, sourceName == null ? "" : sourceName);
             segments.add(TextSegment.from(rawSegments.get(i).text(), metadata));
         }
         embedAndStore(model, segments);
-        log.info("[RAG] 用户 {} 文档《{}》索引完成，共 {} 个片段", userId, sourceName, segments.size());
         scheduleSnapshot();
         return segments.size();
     }
@@ -162,42 +203,16 @@ public class RagService {
     }
 
     /**
-     * 构建某用户专属的检索器：只召回该用户自己的文档片段与历史对话。
+     * 构建某用户专属的混合检索器（向量 + 可选关键词 RRF + 可选 Rerank 精排），
+     * 只召回该用户自己的文档片段与历史对话；任一层缺失自动降级为纯向量。
      */
     public ContentRetriever retrieverOf(String userId) {
-        return query -> {
-            EmbeddingModel model = model();
-            if (model == null) {
-                return List.of();
-            }
-            try {
-                Embedding queryEmbedding = model.embed(query.text()).content();
-                EmbeddingSearchRequest request = EmbeddingSearchRequest.builder()
-                        .queryEmbedding(queryEmbedding)
-                        .maxResults(maxResults)
-                        .minScore(minScore)
-                        .filter(MetadataFilterBuilder.metadataKey(META_USER_ID).isEqualTo(userId))
-                        .build();
-                EmbeddingSearchResult<TextSegment> result = embeddingStore.search(request);
-                List<Content> contents = new ArrayList<>();
-                for (EmbeddingMatch<TextSegment> match : result.matches()) {
-                    TextSegment embedded = match.embedded();
-                    if (embedded != null) {
-                        // 副本 metadata 写入相似度分数（不改库存片段，不影响快照），供观测采集读取
-                        Metadata metadata = embedded.metadata() == null
-                                ? new Metadata() : embedded.metadata().copy();
-                        metadata.put(META_SCORE, match.score());
-                        contents.add(Content.from(TextSegment.from(embedded.text(), metadata)));
-                    }
-                }
-                log.debug("[RAG] 用户 {} 检索「{}」召回 {} 个片段", userId, query.text(), contents.size());
-                return contents;
-            } catch (Exception e) {
-                // 检索失败不阻断对话：跳过上下文注入
-                log.warn("[RAG] 检索失败，本次不注入知识上下文: {}", e.getMessage());
-                return List.of();
-            }
-        };
+        EmbeddingModel model = model();
+        if (model == null) {
+            return query -> List.of();
+        }
+        return new HybridContentRetriever(model, embeddingStore, keywordSearcher,
+                rerankScorer, userId, searchProperties);
     }
 
     // ==================== 内部方法 ====================
