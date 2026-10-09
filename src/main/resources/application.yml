@@ -41,6 +41,10 @@ agent:
   approval:
     # 前端审批弹窗等待时长（秒）；超时高危操作自动拒绝。必须小于 SSE 总超时 5 分钟
     timeout-seconds: 60
+  # ===== 多模态（P1-8）：deepseek-flash 原生支持图片输入，此处仅为防御性校验闸门 =====
+  multimodal:
+    max-images: 6              # 单回合图片数上限（backend 已收紧到 3，agent 侧兜底）
+    max-image-bytes: 20971520  # 单图解码后 ≤20MiB（DeepSeek 内联上限 32MiB，留余量）
   # ===== 联网工具（内置技能 web / http-api） =====
   tools:
     web:

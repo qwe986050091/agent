@@ -59,7 +59,20 @@ public class ReActLoggerListener implements ChatModelListener {
                 if (preview.length() > 80) preview = preview.substring(0, 80) + "...";
                 sb.append("\n  [System] ").append(preview);
             } else if (msg instanceof UserMessage um) {
-                sb.append("\n  [User]   ").append(um.singleText());
+                // 多模态消息只打文本与图片数量标记，严禁输出 ImageContent（其 toString 含 base64）
+                StringBuilder userPreview = new StringBuilder();
+                int imageCount = 0;
+                for (dev.langchain4j.data.message.Content c : um.contents()) {
+                    if (c instanceof dev.langchain4j.data.message.TextContent tc) {
+                        userPreview.append(tc.text());
+                    } else if (c instanceof dev.langchain4j.data.message.ImageContent) {
+                        imageCount++;
+                    }
+                }
+                if (imageCount > 0) {
+                    userPreview.append(" [图片×").append(imageCount).append(']');
+                }
+                sb.append("\n  [User]   ").append(userPreview);
             } else if (msg instanceof AiMessage am) {
                 if (am.hasToolExecutionRequests()) {
                     for (ToolExecutionRequest req : am.toolExecutionRequests()) {

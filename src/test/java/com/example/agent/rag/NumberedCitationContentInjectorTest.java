@@ -1,7 +1,9 @@
 package com.example.agent.rag;
 
+import com.example.agent.agent.MultimodalUserMessages;
 import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.data.message.ImageContent;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.data.segment.TextSegment;
@@ -72,6 +74,30 @@ class NumberedCitationContentInjectorTest {
         assertTrue(text.contains("参考历史对话"));
         assertTrue(!text.contains("知识库资料使用规则"), "纯历史对话不需要引用规则");
         assertTrue(!text.contains("[1]"));
+    }
+
+    @Test
+    void multimodalMessage_preservesImagesAndAppendsDocs() {
+        // P1-8：图片回合命中 RAG 时，注入资料不能把 ImageContent 丢掉
+        String tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+        UserMessage question = MultimodalUserMessages.from("结合知识库看看这张单据",
+                List.of(new MultimodalUserMessages.ImageInput("image/png", tinyPng)));
+
+        ChatMessage result = injector.inject(List.of(doc("d1", "单据规范.pdf", "电子单据需含编号")), question);
+
+        UserMessage um = (UserMessage) result;
+        // 图片原样保留
+        List<ImageContent> images = um.contents().stream()
+                .filter(c -> c instanceof ImageContent).map(c -> (ImageContent) c).toList();
+        assertTrue(images.size() == 1, "图片块必须保留");
+        assertTrue(images.get(0).image().base64Data().equals(tinyPng));
+        // 文本块含原问题 + 注入资料（取文本拼接判断）
+        String text = um.contents().stream()
+                .filter(c -> c instanceof dev.langchain4j.data.message.TextContent)
+                .map(c -> ((dev.langchain4j.data.message.TextContent) c).text())
+                .reduce("", String::concat);
+        assertTrue(text.contains("结合知识库看看这张单据"));
+        assertTrue(text.contains("[1] 《单据规范.pdf》"));
     }
 
     @Test

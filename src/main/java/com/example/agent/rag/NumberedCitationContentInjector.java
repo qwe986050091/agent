@@ -1,6 +1,8 @@
 package com.example.agent.rag;
 
 import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.data.message.ImageContent;
+import dev.langchain4j.data.message.TextContent;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.rag.content.Content;
@@ -36,9 +38,23 @@ public class NumberedCitationContentInjector implements ContentInjector {
         if (contents == null || contents.isEmpty()) {
             return chatMessage;
         }
-        // 注入点只会收到用户消息；其他类型（理论上不会出现）按空原文处理
-        String original = (chatMessage instanceof UserMessage um && um.hasSingleText())
-                ? um.singleText() : "";
+        // 注入点只会收到用户消息；拼接全部 TextContent 作为原文（多模态消息 hasSingleText()=false，
+        // 不能再用 singleText()，否则图片回合原文丢失）；图片内容稍后原样保留
+        List<dev.langchain4j.data.message.Content> originalContents = chatMessage instanceof UserMessage um
+                ? um.contents() : List.of();
+        StringBuilder originalText = new StringBuilder();
+        List<ImageContent> originalImages = new java.util.ArrayList<>();
+        for (dev.langchain4j.data.message.Content c : originalContents) {
+            if (c instanceof TextContent tc) {
+                if (!originalText.isEmpty()) {
+                    originalText.append('\n');
+                }
+                originalText.append(tc.text());
+            } else if (c instanceof ImageContent ic) {
+                originalImages.add(ic);
+            }
+        }
+        String original = originalText.toString();
 
         StringBuilder docs = new StringBuilder();
         StringBuilder conversations = new StringBuilder();
@@ -77,6 +93,14 @@ public class NumberedCitationContentInjector implements ContentInjector {
             body.append("\n===== 参考历史对话（无需标注编号） =====\n")
                     .append(conversations);
         }
-        return UserMessage.from(body.toString());
+        // 多模态回合：注入文本块在前，用户原图（ImageContent）原样保留在后，
+        // 不能退化成 UserMessage.from(String)——那样图片会被静默丢弃（P1-8）
+        if (originalImages.isEmpty()) {
+            return UserMessage.from(body.toString());
+        }
+        List<dev.langchain4j.data.message.Content> newContents = new java.util.ArrayList<>();
+        newContents.add(TextContent.from(body.toString()));
+        newContents.addAll(originalImages);
+        return UserMessage.from(newContents);
     }
 }

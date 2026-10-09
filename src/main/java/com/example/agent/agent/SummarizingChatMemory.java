@@ -96,13 +96,16 @@ public class SummarizingChatMemory implements ChatMemory {
         }
         if (history != null) {
             for (HistoryMessage m : history) {
-                if (m == null || m.content() == null || m.content().isBlank()) {
+                boolean noText = m == null || m.content() == null || m.content().isBlank();
+                boolean noImage = m == null || m.images() == null || m.images().isEmpty();
+                // 纯图片消息（文字为空）也要保留：不能因 content 空白把图片上下文丢掉
+                if (noText && noImage) {
                     continue;
                 }
-                if ("assistant".equalsIgnoreCase(m.role())) {
+                if (m != null && "assistant".equalsIgnoreCase(m.role())) {
                     memory.messages.add(AiMessage.from(m.content()));
-                } else if ("user".equalsIgnoreCase(m.role())) {
-                    memory.messages.add(UserMessage.from(m.content()));
+                } else if (m != null && "user".equalsIgnoreCase(m.role())) {
+                    memory.messages.add(MultimodalUserMessages.from(m.content(), m.images()));
                 }
                 // 其他角色（如 tool）不参与跨回合记忆
             }
@@ -110,8 +113,14 @@ public class SummarizingChatMemory implements ChatMemory {
         return memory;
     }
 
-    /** 历史消息（backend chat_message 表映射） */
-    public record HistoryMessage(String role, String content) {}
+    /** 历史消息（backend chat_message 表映射）；user 消息可携带图片（P1-8 多模态） */
+    public record HistoryMessage(String role, String content,
+                                 List<MultimodalUserMessages.ImageInput> images) {
+        /** 纯文本历史消息便捷构造 */
+        public HistoryMessage(String role, String content) {
+            this(role, content, List.of());
+        }
+    }
 
     @Override
     public Object id() {
@@ -245,7 +254,20 @@ public class SummarizingChatMemory implements ChatMemory {
         }
         if (m instanceof UserMessage) {
             UserMessage u = (UserMessage) m;
-            return u.singleText() != null ? u.singleText() : String.valueOf(u.contents());
+            // 只把文本喂给摘要模型：ImageContent.toString() 含 base64，绝不能进摘要 prompt
+            StringBuilder sb = new StringBuilder();
+            int images = 0;
+            for (dev.langchain4j.data.message.Content c : u.contents()) {
+                if (c instanceof dev.langchain4j.data.message.TextContent tc) {
+                    sb.append(tc.text());
+                } else if (c instanceof dev.langchain4j.data.message.ImageContent) {
+                    images++;
+                }
+            }
+            if (images > 0) {
+                sb.append(" [用户发送了 ").append(images).append(" 张图片]");
+            }
+            return sb.toString();
         }
         return m.toString();
     }

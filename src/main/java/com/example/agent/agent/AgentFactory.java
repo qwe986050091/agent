@@ -6,7 +6,7 @@ import com.example.agent.observability.TraceCollector;
 import com.example.agent.observability.TraceContextHolder;
 import com.example.agent.rag.NumberedCitationContentInjector;
 import com.example.agent.rag.RagService;
-import dev.langchain4j.rag.DefaultRetrievalAugmentor;
+import com.example.agent.rag.TextFirstRetrievalAugmentor;
 import com.example.agent.skill.Skill;
 import com.example.agent.skill.SkillDefinition;
 import com.example.agent.skill.SkillManager;
@@ -97,6 +97,7 @@ public class AgentFactory {
      * @param summary 持久化的历史摘要纯文本（无则 null）
      * @param history 当前消息之前的近期对话（升序）
      * @param skills  该用户已挂载的 Skill 定义（内置技能可只填 name）
+     * @param images  本条用户消息携带的图片（P1-8；空=纯文本回合）
      */
     public record AgentChatRequest(String userId,
                                    Long conversationId,
@@ -104,7 +105,15 @@ public class AgentFactory {
                                    String summary,
                                    List<SummarizingChatMemory.HistoryMessage> history,
                                    List<SkillDefinition> skills,
-                                   List<String> allowedTools) {
+                                   List<String> allowedTools,
+                                   List<MultimodalUserMessages.ImageInput> images) {
+
+        /** 兼容旧七参构造（无图片） */
+        public AgentChatRequest(String userId, Long conversationId, String message, String summary,
+                                List<SummarizingChatMemory.HistoryMessage> history,
+                                List<SkillDefinition> skills, List<String> allowedTools) {
+            this(userId, conversationId, message, summary, history, skills, allowedTools, List.of());
+        }
 
         /** 请求级记忆的唯一键：用户 + 会话（多会话互不串上下文；RAG 检索仍按 userId） */
         public String memoryId() {
@@ -150,16 +159,17 @@ public class AgentFactory {
                 .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
                 .tools(toolsOf(mountedSkills))
                 .chatMemoryProvider(memoryId -> memory)
-                .retrievalAugmentor(DefaultRetrievalAugmentor.builder()
-                        .contentRetriever(retrieverFor(request.userId()))
-                        .contentInjector(new NumberedCitationContentInjector())
-                        .build());
+                .retrievalAugmentor(new TextFirstRetrievalAugmentor(
+                        retrieverFor(request.userId()), new NumberedCitationContentInjector()));
         if (!toolProviders.isEmpty()) {
             builder.toolProviders(toolProviders.toArray(new ToolProvider[0]));
         }
         SimpleAgent agent = builder.build();
 
-        String answer = agent.chat(request.memoryId(), request.message());
+        // 当前消息支持多模态（TextContent + ImageContent）；LC4j 要求以 Content 列表入参
+        dev.langchain4j.data.message.UserMessage currentMessage =
+                MultimodalUserMessages.from(request.message(), request.images());
+        String answer = agent.chat(request.memoryId(), currentMessage.contents());
         return new AgentChatResult(answer == null ? "" : answer, memory.summaryText());
     }
 
@@ -211,16 +221,17 @@ public class AgentFactory {
                 .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
                 .tools(toolsOf(mountedSkills))
                 .chatMemoryProvider(memoryId -> memory)
-                .retrievalAugmentor(DefaultRetrievalAugmentor.builder()
-                        .contentRetriever(retrieverFor(request.userId()))
-                        .contentInjector(new NumberedCitationContentInjector())
-                        .build());
+                .retrievalAugmentor(new TextFirstRetrievalAugmentor(
+                        retrieverFor(request.userId()), new NumberedCitationContentInjector()));
         if (!toolProviders.isEmpty()) {
             builder.toolProviders(toolProviders.toArray(new ToolProvider[0]));
         }
         StreamingSimpleAgent agent = builder.build();
 
-        return agent.chat(request.memoryId(), request.message())
+        // 当前消息支持多模态（TextContent + ImageContent）；LC4j 要求以 Content 列表入参
+        dev.langchain4j.data.message.UserMessage currentMessage =
+                MultimodalUserMessages.from(request.message(), request.images());
+        return agent.chat(request.memoryId(), currentMessage.contents())
                 .onPartialResponse(onToken)
                 .onCompleteResponse(response -> {
                     String text = response.aiMessage().text();

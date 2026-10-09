@@ -1,6 +1,7 @@
 package com.example.agent.controller;
 
 import com.example.agent.agent.AgentFactory;
+import com.example.agent.agent.MultimodalUserMessages;
 import com.example.agent.agent.SummarizingChatMemory;
 import com.example.agent.approval.ApprovalContextHolder;
 import com.example.agent.approval.ApprovalDeniedException;
@@ -101,6 +102,14 @@ public class AgentController {
     @org.springframework.beans.factory.annotation.Value("${agent.approval.timeout-seconds:60}")
     private long approvalTimeoutSeconds;
 
+    /** 单回合最多图片数（P1-8 多模态；DeepSeek 上限 600，backend 已先收紧到 3，此处防御性兜底） */
+    @org.springframework.beans.factory.annotation.Value("${agent.multimodal.max-images:6}")
+    private int maxImages;
+
+    /** 单张图片解码后字节上限（DeepSeek 内联图片上限 32MiB，留余量取 20MiB） */
+    @org.springframework.beans.factory.annotation.Value("${agent.multimodal.max-image-bytes:20971520}")
+    private long maxImageBytes;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public AgentController(AgentFactory agentFactory, ToolRegistry toolRegistry,
@@ -130,10 +139,10 @@ public class AgentController {
     @PostMapping("/chat")
     public ResponseEntity<?> chatPost(HttpServletRequest httpRequest, @RequestBody ChatRequest request) {
         if (request == null) {
-            return ResponseEntity.badRequest().body(new ErrorResponse("BAD_REQUEST", "请求体为空"));
+            return jsonError(HttpStatus.BAD_REQUEST, "BAD_REQUEST", "请求体为空");
         }
         request.normalize();
-        ResponseEntity<?> bad = requireMessage(request.getMessage());
+        ResponseEntity<?> bad = validateChatRequest(request);
         if (bad != null) return bad;
         return runChat(request.toAgentRequest(), traceIdOf(httpRequest));
     }
@@ -154,7 +163,7 @@ public class AgentController {
             } catch (IllegalArgumentException e) {
                 // Skill 定义引用了不存在的 Tool 等数据不一致问题
                 metrics.recordChat("sync", "error", elapsedMs(start));
-                return ResponseEntity.badRequest().body(new ErrorResponse("SKILL_INVALID", e.getMessage()));
+                return jsonError(HttpStatus.BAD_REQUEST, "SKILL_INVALID", e.getMessage());
             } catch (Exception e) {
                 if (AgentFactory.isToolLoopExceeded(e)) {
                     metrics.recordChat("sync", "converged", elapsedMs(start));
@@ -164,8 +173,8 @@ public class AgentController {
                 }
                 metrics.recordChat("sync", "error", elapsedMs(start));
                 log.error("[chat] 对话处理失败", e);
-                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                        .body(new ErrorResponse("CHAT_FAILED", "对话处理失败: " + e.getMessage()));
+                return jsonError(HttpStatus.INTERNAL_SERVER_ERROR,
+                        "CHAT_FAILED", "对话处理失败: " + e.getMessage());
             }
             metrics.recordChat("sync", "success", elapsedMs(start));
             return ResponseEntity.ok(buildResponse(req, collector, result.answer(), result.summary()));
@@ -197,18 +206,18 @@ public class AgentController {
      *   event: usage data: {...}   ← 整轮聚合 token 用量/模型/轮次/耗时
      *   event: approval-request    ← 高危工具执行前请求用户确认（工具线程阻塞等待决策）
      *   event: memory data: {...}  ← 回合摘要（backend 落库用，不转发前端）
+     *   event: error data: {code,message} ← 响应已提交后的终态错误（如上游模型拒绝图片），
+     *                                        发完即正常结束；区别于流开始前的 HTTP 4xx/503 JSON
      *   data: [DONE]               ← 结束标记
      */
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Object chatStream(HttpServletRequest httpRequest, @RequestBody(required = false) ChatRequest request) {
         if (request == null) {
-            return ResponseEntity.badRequest().body(new ErrorResponse("BAD_REQUEST", "请求体为空"));
+            return jsonError(HttpStatus.BAD_REQUEST, "BAD_REQUEST", "请求体为空");
         }
         request.normalize();
-        if (request.getMessage() == null || request.getMessage().trim().isEmpty()) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body(new ErrorResponse("EMPTY_MESSAGE", "参数 message 不能为空或纯空白字符"));
-        }
+        ResponseEntity<?> bad = validateChatRequest(request);
+        if (bad != null) return bad;
 
         // 5 分钟超时：超长回复/僵死 LLM 调用不会无限占用线程与连接
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
@@ -251,7 +260,7 @@ public class AgentController {
         try {
             req = request.toAgentRequest();
         } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body(new ErrorResponse("SKILL_INVALID", e.getMessage()));
+            return jsonError(HttpStatus.BAD_REQUEST, "SKILL_INVALID", e.getMessage());
         }
 
         try {
@@ -262,8 +271,7 @@ public class AgentController {
             metrics.changeSseActive(-1);
             metrics.recordChat("stream", "busy", elapsedMs(acceptedAt));
             log.warn("[chatStream] 流式线程池已满，拒绝请求");
-            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                    .body(new ErrorResponse("SERVICE_BUSY", "当前对话繁忙，请稍后重试"));
+            return jsonError(HttpStatus.SERVICE_UNAVAILABLE, "SERVICE_BUSY", "当前对话繁忙，请稍后重试");
         }
 
         return emitter;
@@ -430,7 +438,78 @@ public class AgentController {
         }
         log.error("[chatStream] 流式对话出错: {}", error.getMessage());
         recordOutcome.accept("error");
-        emitter.completeWithError(error);
+        emitTerminalError(emitter, error);
+    }
+
+    /**
+     * 流式响应已按 text/event-stream 提交后的终态错误出口。
+     * 不能再用 HTTP 状态码或 completeWithError：响应已提交后容器无法改写状态/写出 JSON
+     * （HttpMessageNotWritableException, response committed already），连接只会被粗暴截断，
+     * backend/前端最终只看到模糊的 network error。改为下发命名事件
+     * {@code event: error}（{code,message}）后正常 complete，对端即可拿到可读原因并优雅收尾。
+     */
+    private void emitTerminalError(SseEmitter emitter, Throwable error) {
+        String payload;
+        try {
+            payload = objectMapper.writeValueAsString(java.util.Map.of(
+                    "code", streamErrorCode(error),
+                    "message", friendlyStreamErrorMessage(error)));
+        } catch (Exception e) {
+            payload = "{\"code\":\"CHAT_FAILED\",\"message\":\"对话处理失败，请稍后重试\"}";
+        }
+        try {
+            emitter.send(SseEmitter.event()
+                    .name("error")
+                    .data(payload, MediaType.APPLICATION_JSON));
+            emitter.complete();
+        } catch (Exception sendEx) {
+            // 连接已断开/发送失败：退回错误完成，交由 onError/onTimeout 取消下游链路
+            try {
+                emitter.completeWithError(error);
+            } catch (Exception ignore) {
+                // emitter 已终态
+            }
+        }
+    }
+
+    /** 终态错误码：上游请求类错误（如不支持的图片）单独标出，其余统一 CHAT_FAILED */
+    static String streamErrorCode(Throwable error) {
+        if (error instanceof dev.langchain4j.exception.InvalidRequestException) {
+            return "MODEL_INVALID_REQUEST";
+        }
+        if (error instanceof dev.langchain4j.exception.HttpException) {
+            return "MODEL_HTTP_ERROR";
+        }
+        return "CHAT_FAILED";
+    }
+
+    /**
+     * 提取用户可读的错误信息。
+     * LC4j HttpException/InvalidRequestException 的 message 常是上游整段 JSON
+     * （{"error":{"message":"..."}}），解析出内层 message；已知图片类错误翻译成中文；
+     * 其余原文截断到 500 字，避免把超长报文灌进 SSE。
+     */
+    static String friendlyStreamErrorMessage(Throwable error) {
+        String detail = error.getMessage() == null ? "" : error.getMessage().strip();
+        if (detail.startsWith("{")) {
+            try {
+                var node = new ObjectMapper().readTree(detail);
+                String inner = node.path("error").path("message").asText("");
+                if (!inner.isBlank()) {
+                    detail = inner.strip();
+                }
+            } catch (Exception ignored) {
+                // 非 JSON 报文：保留原文
+            }
+        }
+        if (detail.isBlank()) {
+            return "对话处理失败，请稍后重试";
+        }
+        if (detail.toLowerCase().contains("unsupported image")) {
+            // 不含"请重试"字样：调用方（前端气泡模板）会统一追加"请稍后重试"，避免重复
+            return "模型无法处理该图片（上游判定为不支持的图片），请更换为正常的 JPEG/PNG/GIF/WebP 图片";
+        }
+        return detail.length() > 500 ? detail.substring(0, 500) : detail;
     }
 
     /** 工具轮次超限时：发送 usage + 收敛提示 + 摘要 + [DONE]，正常结束流 */
@@ -504,10 +583,72 @@ public class AgentController {
 
     // ==================== 入参校验 ====================
 
+    /**
+     * 构造 JSON 错误响应并显式声明 application/json。
+     * SSE 端点声明了 produces=text/event-stream：若不在此指定 content-type，
+     * Spring 只能按 text/event-stream 选择消息转换器 → Jackson 无法写 ErrorResponse
+     * （HttpMessageNotWritableException: preset Content-Type 'null'），原始 4xx/503
+     * 会被二次包装成 500，真正的拒绝原因被吞掉。
+     */
+    private static ResponseEntity<ErrorResponse> jsonError(HttpStatus status, String code, String message) {
+        return ResponseEntity.status(status)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(new ErrorResponse(code, message));
+    }
+
     private ResponseEntity<?> requireMessage(String message) {
         if (message == null || message.trim().isEmpty()) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body(new ErrorResponse("EMPTY_MESSAGE", "参数 message 不能为空或纯空白字符"));
+            return jsonError(HttpStatus.BAD_REQUEST, "EMPTY_MESSAGE", "参数 message 不能为空或纯空白字符");
+        }
+        return null;
+    }
+
+    /** 允许的图片 MIME（DeepSeek：按文件实际内容判断，MIME 仍需在白名单内） */
+    private static final Set<String> ALLOWED_IMAGE_MIME =
+            Set.of("image/jpeg", "image/png", "image/gif", "image/webp");
+
+    /**
+     * 对话请求校验（同步/流式共用）：文字与图片至少有其一；图片数量/MIME/base64/大小合法。
+     * backend 已做过权威校验，这里是防御性第二道闸门。
+     */
+    private ResponseEntity<?> validateChatRequest(ChatRequest request) {
+        boolean hasText = request.getMessage() != null && !request.getMessage().trim().isEmpty();
+        boolean hasImage = request.getImages() != null && !request.getImages().isEmpty();
+        if (!hasText && !hasImage) {
+            return jsonError(HttpStatus.BAD_REQUEST, "EMPTY_MESSAGE", "消息内容与图片不能同时为空");
+        }
+        if (hasImage) {
+            if (request.getImages().size() > maxImages) {
+                return jsonError(HttpStatus.BAD_REQUEST, "TOO_MANY_IMAGES",
+                        "单条消息最多携带 " + maxImages + " 张图片");
+            }
+            for (ChatImage img : request.getImages()) {
+                ResponseEntity<?> imgBad = validateImage(img);
+                if (imgBad != null) {
+                    return imgBad;
+                }
+            }
+        }
+        return null;
+    }
+
+    private ResponseEntity<?> validateImage(ChatImage img) {
+        if (img == null || img.getData() == null || img.getData().isBlank()) {
+            return jsonError(HttpStatus.BAD_REQUEST, "INVALID_IMAGE", "图片数据为空");
+        }
+        if (img.getMimeType() == null || !ALLOWED_IMAGE_MIME.contains(img.getMimeType())) {
+            log.warn("[validateImage] 拒绝图片：mimeType={}（不在白名单 {}）",
+                    img.getMimeType(), ALLOWED_IMAGE_MIME);
+            return jsonError(HttpStatus.BAD_REQUEST, "INVALID_IMAGE", "仅支持 JPEG/PNG/GIF/WebP 图片");
+        }
+        try {
+            byte[] bytes = java.util.Base64.getDecoder().decode(img.getData());
+            if (bytes.length > maxImageBytes) {
+                return jsonError(HttpStatus.PAYLOAD_TOO_LARGE, "IMAGE_TOO_LARGE",
+                        "单张图片不能超过 " + (maxImageBytes / 1024 / 1024) + "MB");
+            }
+        } catch (IllegalArgumentException e) {
+            return jsonError(HttpStatus.BAD_REQUEST, "INVALID_IMAGE", "图片 base64 数据非法");
         }
         return null;
     }
@@ -533,6 +674,8 @@ public class AgentController {
         private List<SkillDefinition> skills;
         /** 会话级已授权免确认的工具名（backend 从 Redis 授权集合下发） */
         private List<String> allowedTools;
+        /** 本条用户消息携带的图片（P1-8 多模态），空/null=纯文本回合 */
+        private List<ChatImage> images;
 
         public ChatRequest() {}
 
@@ -553,15 +696,32 @@ public class AgentController {
             if (allowedTools == null) {
                 allowedTools = List.of();
             }
+            if (images == null) {
+                images = List.of();
+            }
         }
 
         public AgentFactory.AgentChatRequest toAgentRequest() {
             List<SummarizingChatMemory.HistoryMessage> hist = history.stream()
-                    .filter(h -> h != null && h.getRole() != null && h.getContent() != null)
-                    .map(h -> new SummarizingChatMemory.HistoryMessage(h.getRole(), h.getContent()))
+                    // 纯文本空消息丢弃；纯图片历史消息（content 为空但有图片）必须保留
+                    .filter(h -> h != null && h.getRole() != null
+                            && ((h.getContent() != null && !h.getContent().isBlank())
+                                || (h.getImages() != null && !h.getImages().isEmpty())))
+                    .map(h -> new SummarizingChatMemory.HistoryMessage(
+                            h.getRole(), h.getContent(), toImageInputs(h.getImages())))
                     .toList();
             return new AgentFactory.AgentChatRequest(userId, conversationId, message, summary,
-                    hist, skills, allowedTools);
+                    hist, skills, allowedTools, toImageInputs(images));
+        }
+
+        private static List<MultimodalUserMessages.ImageInput> toImageInputs(List<ChatImage> imgs) {
+            if (imgs == null || imgs.isEmpty()) {
+                return List.of();
+            }
+            return imgs.stream()
+                    .filter(i -> i != null && i.getData() != null && !i.getData().isBlank())
+                    .map(i -> new MultimodalUserMessages.ImageInput(i.getMimeType(), i.getData()))
+                    .toList();
         }
 
         public String getUserId() { return userId; }
@@ -578,20 +738,45 @@ public class AgentController {
         public void setSkills(List<SkillDefinition> skills) { this.skills = skills; }
         public List<String> getAllowedTools() { return allowedTools; }
         public void setAllowedTools(List<String> allowedTools) { this.allowedTools = allowedTools; }
+        public List<ChatImage> getImages() { return images; }
+        public void setImages(List<ChatImage> images) { this.images = images; }
+    }
+
+    /** 图片入参（P1-8）：mimeType=image/jpeg 等，data=不带 data: 前缀的原始 base64 */
+    public static class ChatImage {
+        private String mimeType;
+        private String data;
+        public ChatImage() {}
+        public ChatImage(String mimeType, String data) {
+            this.mimeType = mimeType;
+            this.data = data;
+        }
+        public String getMimeType() { return mimeType; }
+        public void setMimeType(String mimeType) { this.mimeType = mimeType; }
+        public String getData() { return data; }
+        public void setData(String data) { this.data = data; }
     }
 
     public static class HistoryMessage {
         private String role;
         private String content;
+        /** 历史 user 消息携带的图片（P1-8），assistant 消息恒为空 */
+        private List<ChatImage> images;
         public HistoryMessage() {}
         public HistoryMessage(String role, String content) {
+            this(role, content, null);
+        }
+        public HistoryMessage(String role, String content, List<ChatImage> images) {
             this.role = role;
             this.content = content;
+            this.images = images;
         }
         public String getRole() { return role; }
         public void setRole(String role) { this.role = role; }
         public String getContent() { return content; }
         public void setContent(String content) { this.content = content; }
+        public List<ChatImage> getImages() { return images; }
+        public void setImages(List<ChatImage> images) { this.images = images; }
     }
 
     public static class ChatResponse {
