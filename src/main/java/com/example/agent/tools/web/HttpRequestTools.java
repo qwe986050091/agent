@@ -1,6 +1,7 @@
 package com.example.agent.tools.web;
 
 import com.example.agent.approval.ApprovalGate;
+import com.example.agent.security.OutboundDlpGuard;
 import dev.langchain4j.agent.tool.Tool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,7 +12,8 @@ import java.util.List;
 
 /**
  * 通用 HTTP 请求工具：可对任意外部 API 发起 GET/POST/PUT/PATCH/DELETE。
- * 顺序：方法白名单 + {@link UrlSafetyGuard} 前置拦截（不弹窗）→ 人工确认 → 实际请求。
+ * 顺序：方法白名单 + {@link UrlSafetyGuard} 前置拦截（不弹窗）→ 出站 DLP（P4-17：
+ * 命中真实凭据直接拒绝，高危模式入审批警告）→ 人工确认 → 实际请求。
  * 不支持自定义请求头（v1 限制）。
  */
 @Component
@@ -24,10 +26,13 @@ public class HttpRequestTools {
 
     private final HttpRequestService httpRequestService;
     private final UrlSafetyGuard urlSafetyGuard;
+    private final OutboundDlpGuard outboundDlpGuard;
 
-    public HttpRequestTools(HttpRequestService httpRequestService, UrlSafetyGuard urlSafetyGuard) {
+    public HttpRequestTools(HttpRequestService httpRequestService, UrlSafetyGuard urlSafetyGuard,
+                            OutboundDlpGuard outboundDlpGuard) {
         this.httpRequestService = httpRequestService;
         this.urlSafetyGuard = urlSafetyGuard;
+        this.outboundDlpGuard = outboundDlpGuard;
     }
 
     @Tool("""
@@ -48,10 +53,23 @@ public class HttpRequestTools {
         } catch (UnsafeUrlException e) {
             return "HTTP 请求失败：" + e.getMessage();
         }
-        // 2) 高危：人工确认（审批后实际请求阶段会再次过 SSRF 校验）
-        String preview = "方法: " + normalizedMethod + "\nURL: " + url
-                + (body == null || body.isBlank() ? "" : "\n请求体:\n" + body);
-        ApprovalGate.requireConfirmation("sendHttpRequest", preview);
+        // 2) 出站 DLP（P4-17 §6.3）：登记凭据命中直接拒绝（不进入审批）；高危模式并入审批警告
+        OutboundDlpGuard.DlpResult dlp = outboundDlpGuard.inspect(
+                normalizedMethod + " " + url + "\n" + (body == null ? "" : body));
+        if (dlp.blocked()) {
+            // 不把命中值/键名回给模型：固定文案 + 日志侧有键名可查
+            return "HTTP 请求失败：" + dlp.blockReason();
+        }
+        // 3) 高危：人工确认（审批后实际请求阶段会再次过 SSRF 校验）
+        StringBuilder preview = new StringBuilder();
+        preview.append("方法: ").append(normalizedMethod).append("\nURL: ").append(url);
+        if (body != null && !body.isBlank()) {
+            preview.append("\n请求体:\n").append(body);
+        }
+        for (String warning : dlp.warningLines()) {
+            preview.append('\n').append(warning);
+        }
+        ApprovalGate.requireConfirmation("sendHttpRequest", preview.toString());
         return httpRequestService.send(normalizedMethod, url, body);
     }
 }

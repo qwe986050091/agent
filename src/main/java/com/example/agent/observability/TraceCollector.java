@@ -2,6 +2,7 @@ package com.example.agent.observability;
 
 import com.example.agent.observability.model.RagSegment;
 import com.example.agent.observability.model.RagTraceEvent;
+import com.example.agent.observability.model.SafetyTraceEvent;
 import com.example.agent.observability.model.ToolTraceEvent;
 import com.example.agent.observability.model.TraceEvent;
 import com.example.agent.observability.model.TraceResetEvent;
@@ -46,6 +47,7 @@ public class TraceCollector {
                                             Integer inputTokens, Integer outputTokens) { }
         @Override public void recordToolCall(String toolName, boolean success, long durationMs) { }
         @Override public void recordRagRetrieval(boolean hit, int segmentCount) { }
+        @Override public void recordSafetyMatch(String channel, String verdict, String action) { }
         @Override public void recordChat(String mode, String outcome, long durationMs) { }
         @Override public void changeSseActive(int delta) { }
     };
@@ -61,6 +63,8 @@ public class TraceCollector {
 
     private final List<ToolTraceEvent> tools = new ArrayList<>();
     private final List<RagTraceEvent> retrievals = new ArrayList<>();
+    /** 内容安全检测记录（P4-17）：一回合可多条（input/rag/tool_output/output 各通道） */
+    private final List<SafetyTraceEvent> safeties = new ArrayList<>();
     /** key = 工具调用 id（id 缺失时用合成序号），等待配对的工具请求（按发生顺序） */
     private final Map<String, PendingTool> pendingTools = new LinkedHashMap();
     /** 已完成配对的工具调用 id（多轮请求会重复携带历史结果，用于去重） */
@@ -114,6 +118,7 @@ public class TraceCollector {
         this.fifoSeq = 0;
         this.tools.clear();
         this.retrievals.clear();
+        this.safeties.clear();
         emit(new TraceResetEvent());
     }
 
@@ -212,6 +217,20 @@ public class TraceCollector {
         }
     }
 
+    /** 记录一次内容安全检测（P4-17）；同时打指标，供监控期统计各通道命中率 */
+    public void recordSafety(SafetyTraceEvent event) {
+        if (event == null) {
+            return;
+        }
+        safeties.add(event);
+        emit(event);
+        try {
+            metrics.recordSafetyMatch(event.channel(), event.verdict(), event.action());
+        } catch (Exception ignore) {
+            // 指标异常不影响对话
+        }
+    }
+
     /** 组装回合末用量事件 */
     public UsageTraceEvent toUsageEvent(boolean cancelled) {
         return new UsageTraceEvent(
@@ -229,6 +248,7 @@ public class TraceCollector {
     public int llmErrors() { return llmErrors; }
     public List<ToolTraceEvent> tools() { return List.copyOf(tools); }
     public List<RagTraceEvent> retrievals() { return List.copyOf(retrievals); }
+    public List<SafetyTraceEvent> safeties() { return List.copyOf(safeties); }
 
     private void emit(TraceEvent event) {
         if (sink == null) {

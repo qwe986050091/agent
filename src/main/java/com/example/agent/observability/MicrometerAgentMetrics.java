@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   <li>agent_tool_calls_total{name,outcome}：工具调用次数</li>
  *   <li>agent_rag_recall_total{outcome=hit|miss}：RAG 检索次数（命中率）</li>
  *   <li>agent_rag_segments_total：召回片段总数</li>
+ *   <li>agent_safety_matches_total{channel,verdict,action}：内容安全检测命中（P4-17）</li>
  *   <li>agent_sse_active：在途 SSE 连接数</li>
  * </ul>
  *
@@ -86,6 +87,13 @@ public class MicrometerAgentMetrics implements AgentMetricsSink {
                 registry.counter("agent.rag.segments").increment(segmentCount);
             }
         });
+    }
+
+    @Override
+    public void recordSafetyMatch(String channel, String verdict, String action) {
+        safe(() -> registry.counter("agent.safety.matches",
+                "channel", safeTag(channel), "verdict", safeTag(verdict), "action", safeTag(action))
+                .increment());
     }
 
     @Override

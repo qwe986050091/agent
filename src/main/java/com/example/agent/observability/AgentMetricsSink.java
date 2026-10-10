@@ -16,6 +16,9 @@ public interface AgentMetricsSink {
     /** 一次 RAG 检索完成：hit=是否有命中，segmentCount=召回片段数 */
     void recordRagRetrieval(boolean hit, int segmentCount);
 
+    /** 一次内容安全检测命中（P4-17）：channel=input|rag|tool_output|output|outbound_http */
+    void recordSafetyMatch(String channel, String verdict, String action);
+
     /** 一次对话回合结束：mode=sync|stream，outcome=success|error|converged|cancelled|busy */
     void recordChat(String mode, String outcome, long durationMs);
 

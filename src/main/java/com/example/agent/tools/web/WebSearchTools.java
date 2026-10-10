@@ -1,5 +1,6 @@
 package com.example.agent.tools.web;
 
+import com.example.agent.security.UntrustedContentWrapper;
 import dev.langchain4j.agent.tool.Tool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,9 +18,12 @@ public class WebSearchTools {
     private static final Logger log = LoggerFactory.getLogger(WebSearchTools.class);
 
     private final WebSearchService webSearchService;
+    private final UntrustedContentWrapper untrustedContentWrapper;
 
-    public WebSearchTools(WebSearchService webSearchService) {
+    public WebSearchTools(WebSearchService webSearchService,
+                          UntrustedContentWrapper untrustedContentWrapper) {
         this.webSearchService = webSearchService;
+        this.untrustedContentWrapper = untrustedContentWrapper;
     }
 
     @Tool("""
@@ -30,6 +34,7 @@ public class WebSearchTools {
     public String webSearch(String query, Integer maxResults) {
         log.info("[Tool] webSearch(query={}, maxResults={})", query, maxResults);
         SearchResults results = webSearchService.search(query, maxResults);
-        return webSearchService.render(results);
+        // 搜索结果同为不可信外部内容（P4-17 §5）：边界化 + 可疑命中告警
+        return untrustedContentWrapper.wrap("webSearch", webSearchService.render(results));
     }
 }

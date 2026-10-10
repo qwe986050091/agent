@@ -45,6 +45,23 @@ agent:
   multimodal:
     max-images: 6              # 单回合图片数上限（backend 已收紧到 3，agent 侧兜底）
     max-image-bytes: 20971520  # 单图解码后 ≤20MiB（DeepSeek 内联上限 32MiB，留余量）
+  # ===== 内容安全（P4-17）：prompt 注入检测 / 不可信内容边界化 / 出站 DLP =====
+  safety:
+    enabled: true
+    mode: monitor                 # monitor（只记录）| warn（灰区注警戒语，不拒绝）| block（≥阈值拒绝）
+    rule:
+      block-threshold: 8          # ≥ 该分且 mode=block：拒绝（400 SAFETY_BLOCKED）
+      gray-threshold: 4           # ≥ 该分：灰区（触发 LLM 分类 + 警戒语）
+    llm-classifier:
+      enabled: true
+      model: ""                   # 判定模型，空 = 复用主模型
+      timeout-seconds: 5          # 超时 fail-open 放行（可用性优先）
+      cache-size: 1000            # 输入 hash 判定结果内存缓存条数
+    untrusted-wrap: true          # RAG/工具结果包裹边界 + System Prompt 安全边界声明
+    dlp:
+      enabled: true
+      block-outbound-secrets: true  # 出站请求命中真实凭据（env 实际值）时直接拒绝
+    output-scan: monitor          # off | monitor（v1 只记录，不拦截已发出的流）
   # ===== 联网工具（内置技能 web / http-api） =====
   tools:
     web:

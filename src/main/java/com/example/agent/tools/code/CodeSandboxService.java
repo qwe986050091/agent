@@ -1,5 +1,6 @@
 package com.example.agent.tools.code;
 
+import com.example.agent.security.UntrustedContentWrapper;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,9 +58,13 @@ public class CodeSandboxService {
     private final Semaphore permits;
     private final ExecutorService streamPump;
     private final AtomicLong seq = new AtomicLong();
+    /** 沙箱 stdout 是间接注入载体（脚本可伪造"工具结果/系统指令"文本）：输出统一边界化（P4-17） */
+    private final UntrustedContentWrapper untrustedContentWrapper;
 
-    public CodeSandboxService(CodeToolsProperties props) throws IOException {
+    public CodeSandboxService(CodeToolsProperties props,
+                              UntrustedContentWrapper untrustedContentWrapper) throws IOException {
         this.props = props;
+        this.untrustedContentWrapper = untrustedContentWrapper;
         this.permits = new Semaphore(Math.max(1, props.getMaxConcurrency()), true);
         this.workDir = Paths.get(props.getWorkDir()).toAbsolutePath().normalize();
         Files.createDirectories(workDir);
@@ -296,15 +301,17 @@ public class CodeSandboxService {
             if (text.isBlank()) {
                 return "代码执行完成（无标准输出）。" + truncTail;
             }
-            return text.stripTrailing() + truncTail;
+            // 沙箱输出边界化（P4-17 §5）：stdout 可能伪造指令文本，只可引用不可执行
+            return untrustedContentWrapper.wrap("code-runner", text.stripTrailing()) + truncTail;
         }
         String hint = switch (exitCode) {
             case 137 -> "（进程被 SIGKILL 终止，通常是超出 " + props.getMemoryMax() + " 内存上限）";
             case 143 -> "（进程被 SIGTERM 终止，通常是触达 " + timeoutSeconds + " 秒执行时限）";
             default -> "";
         };
-        return "代码执行失败，退出码 " + exitCode + hint + "，输出如下：\n"
-                + (text.isBlank() ? "（无输出）" : text.stripTrailing()) + truncTail;
+        String body = text.isBlank()
+                ? "（无输出）" : untrustedContentWrapper.wrap("code-runner", text.stripTrailing());
+        return "代码执行失败，退出码 " + exitCode + hint + "，输出如下：\n" + body + truncTail;
     }
 
     private static String locateSystemdRun() {
