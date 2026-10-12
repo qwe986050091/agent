@@ -414,29 +414,8 @@ public class AgentController {
                 }
             };
             // 完整回复 + 最新摘要（工具调用循环结束后的最终状态）
-            BiConsumer<String, String> onComplete = (fullAnswer, summary) -> {
-                if (cancelled.get()) {
-                    recordOutcome.accept("cancelled");
-                    return; // 已取消：不再补发结束事件
-                }
-                try {
-                    // 输出通道监控扫描（P4-17 §7.3；须在 usage 之前，保证 safety 事件先于收尾事件）
-                    scanOutput(collector, fullAnswer);
-                    // usage 必须在 memory/[DONE] 之前发送（backend 落库 + 前端底栏）
-                    emitTraceEvent(emitter, cancelled, collector.toUsageEvent(false));
-                    // 摘要回传事件：JSON 序列化（换行等特殊字符被转义，保证单行 data）
-                    emitter.send(SseEmitter.event()
-                            .name("memory")
-                            .data(Map.of("summary", summary == null ? "" : summary),
-                                    MediaType.APPLICATION_JSON));
-                    emitter.send(SseEmitter.event().data("[DONE]"));
-                    emitter.complete();
-                    recordOutcome.accept("success");
-                } catch (IOException e) {
-                    emitter.completeWithError(e);
-                    recordOutcome.accept("error");
-                }
-            };
+            BiConsumer<String, String> onComplete = (fullAnswer, summary) ->
+                    sendTurnCompletion(emitter, cancelled, collector, fullAnswer, summary, recordOutcome);
             // 异常（TokenStream 回调路径）
             Consumer<Throwable> onError = error -> handleStreamFailure(
                     req, emitter, cancelled, emitted, fallbackUsed, collector, useFallback,
@@ -497,7 +476,7 @@ public class AgentController {
      * backend/前端最终只看到模糊的 network error。改为下发命名事件
      * {@code event: error}（{code,message}）后正常 complete，对端即可拿到可读原因并优雅收尾。
      */
-    private void emitTerminalError(SseEmitter emitter, Throwable error) {
+    void emitTerminalError(SseEmitter emitter, Throwable error) {
         String payload;
         try {
             payload = objectMapper.writeValueAsString(java.util.Map.of(
@@ -561,9 +540,40 @@ public class AgentController {
         return detail.length() > 500 ? detail.substring(0, 500) : detail;
     }
 
+    /**
+     * 回合正常结束的收尾三连：usage → memory → [DONE]，然后 complete。
+     *
+     * 顺序是协议契约：usage 必须最先（backend 落库 + 前端底栏），memory 次之，
+     * [DONE] 最后（客户端据此收尾）。已取消时不补发任何结束事件。
+     *
+     * 包私有以便单测（P2-12）；输出通道扫描须在 usage 之前完成，保证 safety 先于收尾事件。
+     */
+    void sendTurnCompletion(SseEmitter emitter, AtomicBoolean cancelled, TraceCollector collector,
+                            String fullAnswer, String summary, Consumer<String> recordOutcome) {
+        if (cancelled.get()) {
+            recordOutcome.accept("cancelled");
+            return;
+        }
+        try {
+            scanOutput(collector, fullAnswer);
+            emitTraceEvent(emitter, cancelled, collector.toUsageEvent(false));
+            // 摘要回传事件：JSON 序列化（换行等特殊字符被转义，保证单行 data）
+            emitter.send(SseEmitter.event()
+                    .name("memory")
+                    .data(Map.of("summary", summary == null ? "" : summary),
+                            MediaType.APPLICATION_JSON));
+            emitter.send(SseEmitter.event().data("[DONE]"));
+            emitter.complete();
+            recordOutcome.accept("success");
+        } catch (IOException e) {
+            emitter.completeWithError(e);
+            recordOutcome.accept("error");
+        }
+    }
+
     /** 工具轮次超限时：发送 usage + 收敛提示 + 摘要 + [DONE]，正常结束流 */
-    private void sendConverged(SseEmitter emitter, AgentFactory.AgentChatRequest req,
-                               TraceCollector collector, Consumer<String> recordOutcome) {
+    void sendConverged(SseEmitter emitter, AgentFactory.AgentChatRequest req,
+                       TraceCollector collector, Consumer<String> recordOutcome) {
         try {
             emitTraceEvent(emitter, new AtomicBoolean(false), collector.toUsageEvent(false));
             emitter.send(SseEmitter.event().data(TOOL_LOOP_LIMIT_MESSAGE));
@@ -580,7 +590,7 @@ public class AgentController {
     }
 
     /** 发送一个命名 trace 事件（tool/rag/usage）；客户端已取消/断连则静默跳过 */
-    private void emitTraceEvent(SseEmitter emitter, AtomicBoolean cancelled, TraceEvent event) {
+    void emitTraceEvent(SseEmitter emitter, AtomicBoolean cancelled, TraceEvent event) {
         if (cancelled.get()) {
             return;
         }

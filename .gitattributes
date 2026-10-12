@@ -1,0 +1,6 @@
+# Maven Wrapper：Linux 上的 ./mvnw 必须保持 LF（CRLF 的 shebang 会报 "bad interpreter"）
+mvnw text eol=lf
+mvnw.cmd text eol=crlf
+
+# Shell 脚本统一 LF：远端部署脚本靠 scp + sed 去 CR，源头就不该制造 CRLF
+*.sh text eol=lf

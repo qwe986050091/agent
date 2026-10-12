@@ -150,6 +150,20 @@ public class RagService {
     /** 正文切块、写入片段 metadata（含 chunkIndex）、向量化入库并触发快照 */
     private int splitAndStore(EmbeddingModel model, String userId, String docId,
                               String sourceName, String text) {
+        List<TextSegment> segments = chunkDocument(chunkSize, chunkOverlap, userId, docId, sourceName, text);
+        embedAndStore(model, segments);
+        scheduleSnapshot();
+        return segments.size();
+    }
+
+    /**
+     * 把正文切成带 metadata 的片段（P2-12 抽出为包私有 static 便于单测）。
+     *
+     * chunkIndex 是片段在源文档内的序号（从 0 起连续），引用定位依赖它；
+     * sourceName 为 null 时统一落成空串。调用方保证 text 非 null。
+     */
+    static List<TextSegment> chunkDocument(int chunkSize, int chunkOverlap, String userId,
+                                           String docId, String sourceName, String text) {
         Document document = Document.from(text);
         DocumentSplitter splitter = DocumentSplitters.recursive(chunkSize, chunkOverlap);
         List<TextSegment> rawSegments = splitter.split(document);
@@ -164,9 +178,7 @@ public class RagService {
                     .put(META_SOURCE, sourceName == null ? "" : sourceName);
             segments.add(TextSegment.from(rawSegments.get(i).text(), metadata));
         }
-        embedAndStore(model, segments);
-        scheduleSnapshot();
-        return segments.size();
+        return segments;
     }
 
     /**
