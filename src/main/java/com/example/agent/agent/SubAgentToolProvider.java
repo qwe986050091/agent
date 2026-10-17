@@ -1,5 +1,6 @@
 package com.example.agent.agent;
 
+import com.example.agent.observability.AgentScope;
 import com.example.agent.observability.TraceCollector;
 import com.example.agent.observability.TraceContextHolder;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -111,7 +112,8 @@ public class SubAgentToolProvider implements ToolProvider {
             collector.recordDelegation();
         }
         try {
-            String result = runner.run(clamp(task), memoryId);
+            // 进入子代理作用域：其内部执行的所有工具调用会被 trace 标注为归属于本子代理
+            String result = AgentScope.runScoped(skillName, () -> runner.run(clamp(task), memoryId));
             return result == null || result.isBlank() ? "子代理未返回有效内容。" : result;
         } catch (Exception e) {
             log.warn("[SubAgent] 「{}」执行失败: {}", skillName, e.getMessage());

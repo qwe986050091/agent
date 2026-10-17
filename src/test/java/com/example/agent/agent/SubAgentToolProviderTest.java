@@ -1,5 +1,6 @@
 package com.example.agent.agent;
 
+import com.example.agent.observability.AgentScope;
 import com.example.agent.observability.TraceCollector;
 import com.example.agent.observability.TraceContextHolder;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
@@ -116,5 +117,23 @@ class SubAgentToolProviderTest {
         String longName = SubAgentToolProvider.toolNameOf("x".repeat(200));
         assertThat(longName.length()).isLessThanOrEqualTo(64);
         assertThat(longName).startsWith("delegate_");
+    }
+
+    @Test
+    void delegationRunsUnderSubAgentScopeAndRestoresAfterwards() {
+        java.util.concurrent.atomic.AtomicReference<String> seenInRunner = new java.util.concurrent.atomic.AtomicReference<>();
+        SubAgentToolProvider provider = new SubAgentToolProvider(
+                "researcher", "研究子代理", (task, memoryId) -> {
+                    // 子代理内部执行时应处于自己的 Agent 作用域（trace 工具事件据此归属）
+                    seenInRunner.set(AgentScope.current());
+                    return "ok";
+                }, 4, 4000);
+        ToolExecutor executor = provider.provideTools(request()).toolExecutorByName("delegate_researcher");
+
+        executor.execute(call("delegate_researcher", "{\"task\":\"a\"}"), 0L);
+
+        assertThat(seenInRunner).hasValue("researcher");
+        // 委派结束后恢复：主 Agent 作用域不受影响（此处无人设置，应为 null）
+        assertThat(AgentScope.current()).isNull();
     }
 }

@@ -145,14 +145,14 @@ public class TraceCollector {
         llmErrors++;
     }
 
-    /** LLM 决定调用工具：按请求登记待配对项（round 为当前已完成轮次） */
+    /** LLM 决定调用工具：按请求登记待配对项（round 为当前已完成轮次；agentId 记录归属的 Agent） */
     public void pendTool(ToolExecutionRequest request) {
         if (request == null || request.name() == null) {
             return;
         }
         String key = request.id() != null && !request.id().isBlank()
                 ? request.id() : ("fifo-" + (fifoSeq++));
-        pendingTools.put(key, new PendingTool(request, rounds, System.nanoTime()));
+        pendingTools.put(key, new PendingTool(request, rounds, System.nanoTime(), AgentScope.current()));
     }
 
     /** 工具执行结果回到下一轮请求时配对并产出事件 */
@@ -197,7 +197,8 @@ public class TraceCollector {
                 resultPreview,
                 !error,
                 errorText,
-                (System.nanoTime() - pending.startNanos) / 1_000_000L);
+                (System.nanoTime() - pending.startNanos) / 1_000_000L,
+                pending.agentId);
         tools.add(event);
         emit(event);
         try {
@@ -283,7 +284,7 @@ public class TraceCollector {
         return s.length() <= max ? s : s.substring(0, max) + "...";
     }
 
-    /** 待配对的工具请求 */
-    private record PendingTool(ToolExecutionRequest request, int round, long startNanos) {
+    /** 待配对的工具请求（agentId 为登记时所在 Agent 作用域，用于 trace 嵌套归属） */
+    private record PendingTool(ToolExecutionRequest request, int round, long startNanos, String agentId) {
     }
 }

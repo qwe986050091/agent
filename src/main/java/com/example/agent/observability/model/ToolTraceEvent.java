@@ -11,6 +11,7 @@ package com.example.agent.observability.model;
  * @param success    工具执行是否成功（取自 ToolExecutionResultMessage.isError()）
  * @param error      失败时的错误文本（成功为 null）
  * @param durationMs 从「LLM 决定调工具」到「工具结果回到下一轮请求」的近似执行耗时
+ * @param agentId    发起该工具调用的 Agent 标识：null=主 Agent（顶层），非空=子代理技能名（Agent-as-Tool 嵌套归属）
  */
 public record ToolTraceEvent(int round,
                              String id,
@@ -19,5 +20,6 @@ public record ToolTraceEvent(int round,
                              String result,
                              boolean success,
                              String error,
-                             long durationMs) implements TraceEvent {
+                             long durationMs,
+                             String agentId) implements TraceEvent {
 }

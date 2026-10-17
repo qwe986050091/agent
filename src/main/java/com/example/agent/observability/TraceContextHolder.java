@@ -41,9 +41,11 @@ public final class TraceContextHolder {
         return CURRENT.get();
     }
 
-    /** 回合结束清理 ThreadLocal + MDC（务必 finally 调用） */
+    /** 回合结束清理 ThreadLocal + MDC（务必 finally 调用）；一并清理 Agent 作用域，防线程池复用串作用域 */
     public static void clear() {
         CURRENT.remove();
         MDC.remove(MDC_TRACE_ID);
+        // Agent 作用域由 AgentScope.runScoped 在 finally 中恢复，此处兜底再清一次
+        AgentScope.clear();
     }
 }
