@@ -22,9 +22,10 @@ import java.util.function.Consumer;
 /**
  * 单次对话回合的 trace 采集器（请求级，用完即弃，不跨请求保留）。
  *
- * 整条 AiServices 链（LLM 多轮回调、工具执行、RAG 检索）都在同一工作线程运行，
- * 故采集方法无需并发控制；事件同时写入内存列表（回合末随同步 JSON 返回）与
- * live sink（流式时即时发 SSE 命名事件）。
+ * 采集方法均为 {@code synchronized}：单条链在一个工作线程内运行时无竞争；
+ * fan-out 并行子代理会在多个工作线程并发写同一个采集器（经
+ * {@link TraceContextHolder#bind} 绑定），故所有可变状态的读写都必须串行化，
+ * 尤其 {@link #completeTool} 的「按 id 配对」必须整体处于临界区内（否则会错配）。
  *
  * 工具配对原理：LLM 在某轮 onResponse 给出 ToolExecutionRequest，工具执行结果
  * 在下一轮 onRequest 的消息中以 ToolExecutionResultMessage 出现（id 对应），
@@ -106,7 +107,7 @@ public class TraceCollector {
      * 标记 fallback 并清空首轮已采集内容（失败尝试可能已真实执行工具/触发 RAG），
      * 同时向 live sink 发 trace-reset，让后端/前端清空已累积数据，避免重复审计/重复面板。
      */
-    public void prepareForFallback() {
+    public synchronized void prepareForFallback() {
         this.fallback = true;
         this.rounds = 0;
         this.inputTokens = 0;
@@ -126,7 +127,7 @@ public class TraceCollector {
     }
 
     /** 记录一次完成的 LLM 调用：轮次 +1，累加 token 用量，更新模型名 */
-    public void recordLlmResponse(TokenUsage usage, String modelName) {
+    public synchronized void recordLlmResponse(TokenUsage usage, String modelName) {
         rounds++;
         if (modelName != null && !modelName.isBlank()) {
             this.model = modelName;
@@ -141,12 +142,12 @@ public class TraceCollector {
         }
     }
 
-    public void recordLlmError() {
+    public synchronized void recordLlmError() {
         llmErrors++;
     }
 
     /** LLM 决定调用工具：按请求登记待配对项（round 为当前已完成轮次；agentId 记录归属的 Agent） */
-    public void pendTool(ToolExecutionRequest request) {
+    public synchronized void pendTool(ToolExecutionRequest request) {
         if (request == null || request.name() == null) {
             return;
         }
@@ -156,7 +157,7 @@ public class TraceCollector {
     }
 
     /** 工具执行结果回到下一轮请求时配对并产出事件 */
-    public void completeTool(ToolExecutionResultMessage result) {
+    public synchronized void completeTool(ToolExecutionResultMessage result) {
         if (result == null) {
             return;
         }
@@ -209,7 +210,7 @@ public class TraceCollector {
     }
 
     /** 记录一次 RAG 检索（query + 召回片段），无命中时 segments 为空 */
-    public void recordRag(String query, List<RagSegment> segments) {
+    public synchronized void recordRag(String query, List<RagSegment> segments) {
         List<RagSegment> copy = List.copyOf(segments);
         RagTraceEvent event = new RagTraceEvent(truncate(query, MAX_QUERY), copy);
         retrievals.add(event);
@@ -222,7 +223,7 @@ public class TraceCollector {
     }
 
     /** 记录一次内容安全检测（P4-17）；同时打指标，供监控期统计各通道命中率 */
-    public void recordSafety(SafetyTraceEvent event) {
+    public synchronized void recordSafety(SafetyTraceEvent event) {
         if (event == null) {
             return;
         }
@@ -236,7 +237,7 @@ public class TraceCollector {
     }
 
     /** 组装回合末用量事件 */
-    public UsageTraceEvent toUsageEvent(boolean cancelled) {
+    public synchronized UsageTraceEvent toUsageEvent(boolean cancelled) {
         return new UsageTraceEvent(
                 model,
                 inputTokens,
@@ -248,18 +249,18 @@ public class TraceCollector {
                 (System.nanoTime() - startNanos) / 1_000_000L);
     }
 
-    public boolean usagePresent() { return usagePresent; }
-    public int llmErrors() { return llmErrors; }
+    public synchronized boolean usagePresent() { return usagePresent; }
+    public synchronized int llmErrors() { return llmErrors; }
 
     /** 本回合已发生的子代理委派次数（Agent-as-Tool 全局预算：与单循环轮次上限共同约束总成本） */
-    public int delegations() { return delegations; }
+    public synchronized int delegations() { return delegations; }
 
-    /** 记录一次子代理委派（由 SubAgentToolProvider 在执行委派前调用） */
-    public void recordDelegation() { delegations++; }
+    /** 记录一次子代理委派（由 SubAgentToolProvider / FanoutToolProvider 在委派前调用） */
+    public synchronized void recordDelegation() { delegations++; }
 
-    public List<ToolTraceEvent> tools() { return List.copyOf(tools); }
-    public List<RagTraceEvent> retrievals() { return List.copyOf(retrievals); }
-    public List<SafetyTraceEvent> safeties() { return List.copyOf(safeties); }
+    public synchronized List<ToolTraceEvent> tools() { return List.copyOf(tools); }
+    public synchronized List<RagTraceEvent> retrievals() { return List.copyOf(retrievals); }
+    public synchronized List<SafetyTraceEvent> safeties() { return List.copyOf(safeties); }
 
     private void emit(TraceEvent event) {
         if (sink == null) {

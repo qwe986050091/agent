@@ -47,6 +47,11 @@ public class SubAgentSkill implements Skill {
         return privateTools;
     }
 
+    /** 专家执行体（供 fan-out 扇出复用） */
+    public SubAgentToolProvider.SubAgentRunner runner() {
+        return provider.runner();
+    }
+
     @Override
     public String name() {
         return definition.getName();

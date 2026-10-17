@@ -365,9 +365,13 @@ public class AgentController {
             throw new ApprovalDeniedException("连接已取消，审批请求无法下发");
         }
         try {
-            emitter.send(SseEmitter.event()
-                    .name("approval-request")
-                    .data(objectMapper.writeValueAsString(approvalRequest), MediaType.APPLICATION_JSON));
+            String json = objectMapper.writeValueAsString(approvalRequest);
+            // SseEmitter 非线程安全：fan-out 后多个工作线程可能并发发送，必须串行化，否则流会交错/损坏
+            synchronized (emitter) {
+                emitter.send(SseEmitter.event()
+                        .name("approval-request")
+                        .data(json, MediaType.APPLICATION_JSON));
+            }
         } catch (IOException e) {
             throw new ApprovalDeniedException("审批请求下发失败（连接可能已断开）");
         }
@@ -603,7 +607,10 @@ public class AgentController {
                 case SafetyTraceEvent ignored -> "safety";
             };
             String json = objectMapper.writeValueAsString(event);
-            emitter.send(SseEmitter.event().name(name).data(json, MediaType.APPLICATION_JSON));
+            // SseEmitter 非线程安全：fan-out 并发子代理的 trace 事件来自多个工作线程，必须串行化
+            synchronized (emitter) {
+                emitter.send(SseEmitter.event().name(name).data(json, MediaType.APPLICATION_JSON));
+            }
         } catch (Exception e) {
             // 断连/序列化失败不影响主流程
             log.debug("[chatStream] trace 事件 {} 发送失败: {}",

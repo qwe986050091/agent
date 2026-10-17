@@ -79,6 +79,11 @@ public class SubAgentToolProvider implements ToolProvider {
         return toolName;
     }
 
+    /** 子代理执行体（供 fan-out 扇出复用：同一子代理既可按工具委派，也可被并行扇出） */
+    public SubAgentRunner runner() {
+        return runner;
+    }
+
     @Override
     public ToolProviderResult provideTools(ToolProviderRequest request) {
         ToolSpecification spec = ToolSpecification.builder()

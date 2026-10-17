@@ -27,7 +27,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
@@ -90,6 +92,12 @@ public class AgentFactory {
     private final SafetyProperties safetyProperties;
     /** 意图路由：把本轮交给命中的单个专家（默认关闭） */
     private final IntentRouter intentRouter;
+    /** fan-out 并行执行器 */
+    private final FanoutExecutor fanoutExecutor;
+    /** fan-out 是否启用（agent.fanout.enabled；不启用时正交，不影响现有行为） */
+    private final boolean fanoutEnabled;
+    /** 回合级委派预算上限（与 SubAgentFactory 共用同一配置项；fan-out 按任务数计入） */
+    private final int maxDelegationsPerTurn;
 
     /** 工具调用最大轮次（agent.loop.max-tool-round-trips），超限后强制收敛 */
     private final int maxToolRoundTrips;
@@ -108,6 +116,9 @@ public class AgentFactory {
                         InjectionRuleScanner injectionRuleScanner,
                         SafetyProperties safetyProperties,
                         IntentRouter intentRouter,
+                        FanoutExecutor fanoutExecutor,
+                        @Value("${agent.fanout.enabled:false}") boolean fanoutEnabled,
+                        @Value("${agent.subagent.max-delegations-per-turn:4}") int maxDelegationsPerTurn,
                         @Value("${agent.loop.max-tool-round-trips:15}") int maxToolRoundTrips) {
         this.chatModel = chatModel;
         this.fallbackChatModel = fallbackChatModel;
@@ -118,6 +129,9 @@ public class AgentFactory {
         this.injectionRuleScanner = injectionRuleScanner;
         this.safetyProperties = safetyProperties;
         this.intentRouter = intentRouter;
+        this.fanoutExecutor = fanoutExecutor;
+        this.fanoutEnabled = fanoutEnabled;
+        this.maxDelegationsPerTurn = maxDelegationsPerTurn;
         this.maxToolRoundTrips = maxToolRoundTrips;
     }
 
@@ -359,7 +373,8 @@ public class AgentFactory {
      *   2. 否则 → 默认主 Agent（Supervisor）：人设 + 各技能委派指引 + 全部技能工具 + 动态 ToolProvider。
      */
     private TurnPlan planTurn(AgentChatRequest request, List<Skill> mountedSkills) {
-        SubAgentSkill routed = routeToSpecialist(request, mountedSkills);
+        List<SubAgentSkill> specialists = specialistsOf(mountedSkills);
+        SubAgentSkill routed = routeToSpecialist(request, specialists);
         if (routed != null) {
             String persona = DEFAULT_PERSONA
                     + "\n\n【本轮身份】你被路由为专项专家「" + routed.name() + "」，请按其职责独立完成本轮回答。\n"
@@ -367,20 +382,26 @@ public class AgentFactory {
             return new TurnPlan(buildSystemMessage(persona),
                     routed.privateTools().toArray(), List.of());
         }
+        List<ToolProvider> providers = new ArrayList<>(toolProvidersOf(mountedSkills));
+        ToolProvider fanout = fanoutProvider(specialists);
+        if (fanout != null) {
+            providers.add(fanout);
+        }
         return new TurnPlan(buildSystemMessage(supervisorPersona(mountedSkills)),
-                toolsOf(mountedSkills), toolProvidersOf(mountedSkills));
+                toolsOf(mountedSkills), providers);
     }
 
-    /** 路由判定：返回命中的子代理技能；未启用 / 无子代理 / 判定为 none / 判定异常均返回 null（走主 Agent） */
-    private SubAgentSkill routeToSpecialist(AgentChatRequest request, List<Skill> mountedSkills) {
-        if (intentRouter == null || !intentRouter.isEnabled()) {
-            return null;
-        }
-        List<SubAgentSkill> specialists = mountedSkills.stream()
+    /** 已挂载技能中的子代理专家 */
+    private static List<SubAgentSkill> specialistsOf(List<Skill> mountedSkills) {
+        return mountedSkills.stream()
                 .filter(SubAgentSkill.class::isInstance)
                 .map(SubAgentSkill.class::cast)
                 .toList();
-        if (specialists.isEmpty()) {
+    }
+
+    /** 路由判定：返回命中的子代理技能；未启用 / 无子代理 / 判定为 none / 判定异常均返回 null（走主 Agent） */
+    private SubAgentSkill routeToSpecialist(AgentChatRequest request, List<SubAgentSkill> specialists) {
+        if (intentRouter == null || !intentRouter.isEnabled() || specialists.isEmpty()) {
             return null;
         }
         List<IntentRouter.Candidate> candidates = specialists.stream()
@@ -389,6 +410,24 @@ public class AgentFactory {
         return intentRouter.route(request.message(), candidates)
                 .flatMap(name -> specialists.stream().filter(s -> s.name().equals(name)).findFirst())
                 .orElse(null);
+    }
+
+    /**
+     * fan-out 并行扇出工具：agent.fanout.enabled 且存在子代理且执行器可用时挂上；
+     * 否则返回 null（该轮不具备扇出能力，模型退化为逐个 delegate）。
+     */
+    private ToolProvider fanoutProvider(List<SubAgentSkill> specialists) {
+        if (!fanoutEnabled || specialists.isEmpty()
+                || fanoutExecutor == null || !fanoutExecutor.available()) {
+            return null;
+        }
+        Map<String, SubAgentToolProvider.SubAgentRunner> runners = new LinkedHashMap<>();
+        Map<String, String> labels = new LinkedHashMap<>();
+        for (SubAgentSkill s : specialists) {
+            runners.put(s.name(), s.runner());
+            labels.put(s.name(), s.shortDescription() == null ? "" : s.shortDescription());
+        }
+        return new FanoutToolProvider(fanoutExecutor, runners, labels, maxDelegationsPerTurn);
     }
 
     /**

@@ -41,6 +41,27 @@ public final class TraceContextHolder {
         return CURRENT.get();
     }
 
+    /**
+     * 把「已有」采集器绑定到当前线程（不创建新采集器）。
+     *
+     * 供 fan-out 工作线程使用：并发子代理与回合工作线程共享同一个请求级采集器，
+     * 只是需要在本线程可见（ThreadLocal 不会自动跨线程传递），否则并发子代理的
+     * trace 事件会静默丢失。
+     */
+    public static void bind(TraceCollector collector, String traceId) {
+        if (traceId != null && !traceId.isBlank()) {
+            MDC.put(MDC_TRACE_ID, traceId);
+        }
+        CURRENT.set(collector);
+    }
+
+    /** 解除当前线程绑定（fan-out 工作线程 finally 调用；只清本线程，不影响回合级采集器） */
+    public static void unbind() {
+        CURRENT.remove();
+        MDC.remove(MDC_TRACE_ID);
+        AgentScope.clear();
+    }
+
     /** 回合结束清理 ThreadLocal + MDC（务必 finally 调用）；一并清理 Agent 作用域，防线程池复用串作用域 */
     public static void clear() {
         CURRENT.remove();
