@@ -290,7 +290,7 @@ public class AgentFactory {
      * 请求前置准备：解析本次生效的 Skills 并打印日志
      */
     private List<Skill> prepare(AgentChatRequest request) {
-        List<Skill> mountedSkills = skillManager.resolveSkills(request.skills());
+        List<Skill> mountedSkills = skillManager.resolveSkills(request.skills(), request.userId());
         if (mountedSkills.isEmpty()) {
             log.info("[AgentFactory] 用户 {} 未挂载任何 Skill，将以纯对话模式响应（无工具）", request.userId());
         } else {

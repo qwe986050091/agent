@@ -30,6 +30,9 @@ class SkillManagerResolveTest {
     private Skill builtinSkill;
     private SubAgentFactory subAgentFactory;
 
+    /** 请求用户（子代理 RAG 按用户隔离；本测不涉及检索，传固定值即可） */
+    private static final String USER = "u-1";
+
     @BeforeEach
     void setUp() {
         toolRegistry = mock(ToolRegistry.class);
@@ -69,7 +72,7 @@ class SkillManagerResolveTest {
 
     @Test
     void nullDefinitionsYieldEmptyList() {
-        assertThat(skillManager.resolveSkills(null)).isEmpty();
+        assertThat(skillManager.resolveSkills(null, USER)).isEmpty();
     }
 
     @Test
@@ -80,7 +83,7 @@ class SkillManagerResolveTest {
         defs.add(definition("", "toolA"));
         defs.add(definition("   ", "toolA"));
 
-        assertThat(skillManager.resolveSkills(defs)).isEmpty();
+        assertThat(skillManager.resolveSkills(defs, USER)).isEmpty();
     }
 
     @Test
@@ -88,7 +91,7 @@ class SkillManagerResolveTest {
         SkillDefinition def = definition("calculator", "someUnknownTool");
         def.setSystemPrompt("下发的兜底提示（应被忽略）");
 
-        List<Skill> resolved = skillManager.resolveSkills(List.of(def));
+        List<Skill> resolved = skillManager.resolveSkills(List.of(def), USER);
 
         assertThat(resolved).hasSize(1);
         // 内置技能以代码为准：返回的就是同一个实例，定义里的字段不参与
@@ -102,7 +105,7 @@ class SkillManagerResolveTest {
         when(toolRegistry.getTool("toolA")).thenReturn(toolA);
         when(toolRegistry.getTool("toolB")).thenReturn(toolB);
 
-        List<Skill> resolved = skillManager.resolveSkills(List.of(definition("report", "toolB", "toolA")));
+        List<Skill> resolved = skillManager.resolveSkills(List.of(definition("report", "toolB", "toolA")), USER);
 
         assertThat(resolved).hasSize(1);
         Skill skill = resolved.get(0);
@@ -115,7 +118,7 @@ class SkillManagerResolveTest {
         Object toolA = new Object();
         when(toolRegistry.getTool("toolA")).thenReturn(toolA);
 
-        Skill skill = skillManager.resolveSkills(List.of(definition("demo", "toolA"))).get(0);
+        Skill skill = skillManager.resolveSkills(List.of(definition("demo", "toolA")), USER).get(0);
 
         assertThat(skill.name()).isEqualTo("demo");
         assertThat(skill.shortDescription()).isEqualTo("短描述-demo");
@@ -127,7 +130,7 @@ class SkillManagerResolveTest {
 
     @Test
     void nullToolNamesYieldsEmptyToolsWithoutError() {
-        List<Skill> resolved = skillManager.resolveSkills(List.of(definition("no-tools", (String[]) null)));
+        List<Skill> resolved = skillManager.resolveSkills(List.of(definition("no-tools", (String[]) null)), USER);
 
         assertThat(resolved).hasSize(1);
         assertThat(resolved.get(0).tools()).isEmpty();
@@ -138,7 +141,7 @@ class SkillManagerResolveTest {
         when(toolRegistry.getTool("ghostTool")).thenReturn(null);
         when(toolRegistry.getAllToolNames()).thenReturn(Set.of("toolA", "toolB"));
 
-        assertThatThrownBy(() -> skillManager.resolveSkills(List.of(definition("broken", "ghostTool"))))
+        assertThatThrownBy(() -> skillManager.resolveSkills(List.of(definition("broken", "ghostTool")), USER))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("broken")
                 .hasMessageContaining("ghostTool")
@@ -154,7 +157,7 @@ class SkillManagerResolveTest {
         when(toolRegistry.getTool("toolA")).thenReturn(toolA);
 
         List<Skill> resolved = skillManager.resolveSkills(List.of(
-                definition("dup", "toolA"), definition("dup", "toolA")));
+                definition("dup", "toolA"), definition("dup", "toolA")), USER);
 
         assertThat(resolved).hasSize(2);
     }
@@ -166,9 +169,9 @@ class SkillManagerResolveTest {
         SkillDefinition def = definition("researcher", "webSearchTools");
         def.setType(SkillDefinition.TYPE_AGENT);
         Skill subAgent = mock(Skill.class);
-        when(subAgentFactory.buildAgentSkill(def)).thenReturn(subAgent);
+        when(subAgentFactory.buildAgentSkill(def, USER)).thenReturn(subAgent);
 
-        List<Skill> resolved = skillManager.resolveSkills(List.of(def));
+        List<Skill> resolved = skillManager.resolveSkills(List.of(def), USER);
 
         // type=agent 走子代理分支：交给 SubAgentFactory 构建，而非把私有工具直挂主 Agent
         assertThat(resolved).containsExactly(subAgent);
@@ -182,7 +185,7 @@ class SkillManagerResolveTest {
         SkillDefinition def = definition("downgraded", "toolA");
         def.setType(SkillDefinition.TYPE_AGENT);
 
-        Skill skill = skillManager.resolveSkills(List.of(def)).get(0);
+        Skill skill = skillManager.resolveSkills(List.of(def), USER).get(0);
 
         // 子代理能力关闭：退化为普通技能（工具直挂主 Agent），保证可用性不因开关而丢失
         assertThat(skill).isInstanceOf(ConfigurableSkill.class);
@@ -196,7 +199,7 @@ class SkillManagerResolveTest {
         SkillDefinition def = definition("plain", "toolA");
         def.setType(SkillDefinition.TYPE_TOOL);
 
-        Skill skill = skillManager.resolveSkills(List.of(def)).get(0);
+        Skill skill = skillManager.resolveSkills(List.of(def), USER).get(0);
 
         assertThat(skill).isInstanceOf(ConfigurableSkill.class);
     }

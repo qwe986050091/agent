@@ -83,10 +83,11 @@ public class SkillManager {
      * 按 backend 下发的已挂载 Skill 定义，解析出本次请求生效的 Skill 列表。
      *
      * @param definitions backend 持久化的 Skill 定义（内置技能可只填 name；自定义技能需完整字段）
+     * @param userId      会话用户（子代理的 RAG 检索按用户隔离；可为空）
      * @return 本次装配给 Agent 的 Skill（顺序与入参一致，去重）
      * @throws IllegalArgumentException 自定义 Skill 引用了不存在的 Tool 名称时抛出（数据不一致需暴露）
      */
-    public List<Skill> resolveSkills(List<SkillDefinition> definitions) {
+    public List<Skill> resolveSkills(List<SkillDefinition> definitions, String userId) {
         List<Skill> result = new ArrayList<>();
         if (definitions == null) {
             return result;
@@ -103,7 +104,7 @@ public class SkillManager {
             }
             if (def.isAgentType() && subAgentFactory != null && subAgentFactory.isEnabled()) {
                 // 子代理技能（Agent-as-Tool）：主 Agent 只看到一个委派工具，私有工具归子代理
-                result.add(subAgentFactory.buildAgentSkill(def));
+                result.add(subAgentFactory.buildAgentSkill(def, userId));
                 continue;
             }
             result.add(buildConfigurable(def));
