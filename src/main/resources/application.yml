@@ -44,6 +44,9 @@ agent:
     max-delegations-per-turn: 4      # 单回合所有子代理的委派次数上限（全局预算，防多子代理 fan-out 成本失控）
     max-task-chars: 4000             # 单次委派任务指令字符上限（防超长任务灌爆子代理上下文）
     rag-enabled: true                # 子代理是否接入 RAG（按用户检索知识库；RAG 关闭/降级时自动退化为纯工具模式）
+  # ===== 意图路由（Router）：把本轮交给命中的单个专家，不命中则走主 Agent（Supervisor） =====
+  router:
+    enabled: false                   # 默认关闭；开启后每轮多一次轻量判定调用（判定模型复用主模型）
   # ===== 高危工具人工确认（human-in-the-loop） =====
   approval:
     # 前端审批弹窗等待时长（秒）；超时高危操作自动拒绝。必须小于 SSE 总超时 5 分钟

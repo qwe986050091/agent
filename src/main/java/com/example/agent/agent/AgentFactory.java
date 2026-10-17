@@ -13,6 +13,7 @@ import com.example.agent.security.SafetyProperties;
 import com.example.agent.skill.Skill;
 import com.example.agent.skill.SkillDefinition;
 import com.example.agent.skill.SkillManager;
+import com.example.agent.skill.SubAgentSkill;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
@@ -87,6 +88,8 @@ public class AgentFactory {
     private final InjectionRuleScanner injectionRuleScanner;
     /** 内容安全配置（agent.safety.*） */
     private final SafetyProperties safetyProperties;
+    /** 意图路由：把本轮交给命中的单个专家（默认关闭） */
+    private final IntentRouter intentRouter;
 
     /** 工具调用最大轮次（agent.loop.max-tool-round-trips），超限后强制收敛 */
     private final int maxToolRoundTrips;
@@ -104,6 +107,7 @@ public class AgentFactory {
                         ObjectProvider<RagService> ragServiceProvider,
                         InjectionRuleScanner injectionRuleScanner,
                         SafetyProperties safetyProperties,
+                        IntentRouter intentRouter,
                         @Value("${agent.loop.max-tool-round-trips:15}") int maxToolRoundTrips) {
         this.chatModel = chatModel;
         this.fallbackChatModel = fallbackChatModel;
@@ -113,6 +117,7 @@ public class AgentFactory {
         this.ragServiceProvider = ragServiceProvider;
         this.injectionRuleScanner = injectionRuleScanner;
         this.safetyProperties = safetyProperties;
+        this.intentRouter = intentRouter;
         this.maxToolRoundTrips = maxToolRoundTrips;
     }
 
@@ -177,18 +182,18 @@ public class AgentFactory {
 
     private AgentChatResult doChat(AgentChatRequest request, List<Skill> mountedSkills,
                                    SummarizingChatMemory memory, ChatModel model) {
-        List<ToolProvider> toolProviders = toolProvidersOf(mountedSkills);
+        TurnPlan plan = planTurn(request, mountedSkills);
         AiServices<SimpleAgent> builder = AiServices.builder(SimpleAgent.class)
                 .chatModel(model)
                 .maxToolCallingRoundTrips(maxToolRoundTrips)
-                .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
-                .tools(toolsOf(mountedSkills))
+                .systemMessageProvider(memoryId -> plan.systemMessage())
+                .tools(plan.tools())
                 .chatMemoryProvider(memoryId -> memory)
                 .retrievalAugmentor(new TextFirstRetrievalAugmentor(
                         retrieverFor(request.userId()),
                         new NumberedCitationContentInjector(injectionRuleScanner)));
-        if (!toolProviders.isEmpty()) {
-            builder.toolProviders(toolProviders.toArray(new ToolProvider[0]));
+        if (!plan.toolProviders().isEmpty()) {
+            builder.toolProviders(plan.toolProviders().toArray(new ToolProvider[0]));
         }
         SimpleAgent agent = builder.build();
 
@@ -240,18 +245,18 @@ public class AgentFactory {
         StreamingChatModel effectiveModel = collector == null && gate == null
                 ? model
                 : new TraceAwareStreamingChatModel(model, collector, gate);
-        List<ToolProvider> toolProviders = toolProvidersOf(mountedSkills);
+        TurnPlan plan = planTurn(request, mountedSkills);
         AiServices<StreamingSimpleAgent> builder = AiServices.builder(StreamingSimpleAgent.class)
                 .streamingChatModel(effectiveModel)
                 .maxToolCallingRoundTrips(maxToolRoundTrips)
-                .systemMessageProvider(memoryId -> buildSystemMessage(mountedSkills))
-                .tools(toolsOf(mountedSkills))
+                .systemMessageProvider(memoryId -> plan.systemMessage())
+                .tools(plan.tools())
                 .chatMemoryProvider(memoryId -> memory)
                 .retrievalAugmentor(new TextFirstRetrievalAugmentor(
                         retrieverFor(request.userId()),
                         new NumberedCitationContentInjector(injectionRuleScanner)));
-        if (!toolProviders.isEmpty()) {
-            builder.toolProviders(toolProviders.toArray(new ToolProvider[0]));
+        if (!plan.toolProviders().isEmpty()) {
+            builder.toolProviders(plan.toolProviders().toArray(new ToolProvider[0]));
         }
         StreamingSimpleAgent agent = builder.build();
 
@@ -343,25 +348,54 @@ public class AgentFactory {
         return new ObservabilityRetriever(ragService.retrieverOf(userId));
     }
 
+    /** 一轮对话的装配方案：系统提示 + 直挂工具 + 动态工具提供者 */
+    private record TurnPlan(String systemMessage, Object[] tools, List<ToolProvider> toolProviders) {
+    }
+
     /**
-     * 拼接动态 System Message
-     * 默认人设 +（安全边界声明）+ 每个已挂载 Skill 的 systemPrompt
-     *
-     * 安全边界声明无法预知本轮是否真的会召回 RAG/调用工具（RAG 在链内执行、工具由模型决定），
-     * 因此 untrusted-wrap 开启时恒定拼入（约 80 token，换防御确定性，不做省 token 的条件优化）。
+     * 规划本轮装配方案。
+     *   1. 路由命中（agent.router.enabled 且挂载了子代理）→ 直接把该专家作为本轮主 Agent：
+     *      用专家身份提示 + 其私有工具，不进入 Supervisor（不挂委派工具）；
+     *   2. 否则 → 默认主 Agent（Supervisor）：人设 + 各技能委派指引 + 全部技能工具 + 动态 ToolProvider。
      */
-    private String buildSystemMessage(List<Skill> mountedSkills) {
+    private TurnPlan planTurn(AgentChatRequest request, List<Skill> mountedSkills) {
+        SubAgentSkill routed = routeToSpecialist(request, mountedSkills);
+        if (routed != null) {
+            String persona = DEFAULT_PERSONA
+                    + "\n\n【本轮身份】你被路由为专项专家「" + routed.name() + "」，请按其职责独立完成本轮回答。\n"
+                    + routed.specialistSystemPrompt();
+            return new TurnPlan(buildSystemMessage(persona),
+                    routed.privateTools().toArray(), List.of());
+        }
+        return new TurnPlan(buildSystemMessage(supervisorPersona(mountedSkills)),
+                toolsOf(mountedSkills), toolProvidersOf(mountedSkills));
+    }
+
+    /** 路由判定：返回命中的子代理技能；未启用 / 无子代理 / 判定为 none / 判定异常均返回 null（走主 Agent） */
+    private SubAgentSkill routeToSpecialist(AgentChatRequest request, List<Skill> mountedSkills) {
+        if (intentRouter == null || !intentRouter.isEnabled()) {
+            return null;
+        }
+        List<SubAgentSkill> specialists = mountedSkills.stream()
+                .filter(SubAgentSkill.class::isInstance)
+                .map(SubAgentSkill.class::cast)
+                .toList();
+        if (specialists.isEmpty()) {
+            return null;
+        }
+        List<IntentRouter.Candidate> candidates = specialists.stream()
+                .map(s -> new IntentRouter.Candidate(s.name(), s.shortDescription()))
+                .toList();
+        return intentRouter.route(request.message(), candidates)
+                .flatMap(name -> specialists.stream().filter(s -> s.name().equals(name)).findFirst())
+                .orElse(null);
+    }
+
+    /**
+     * Supervisor（主 Agent）人设：默认人设 + 每个已挂载技能的委派/使用指引。
+     */
+    private String supervisorPersona(List<Skill> mountedSkills) {
         StringBuilder sb = new StringBuilder(DEFAULT_PERSONA);
-
-        if (safetyProperties.isEnabled() && safetyProperties.isUntrustedWrap()) {
-            sb.append(SAFETY_BOUNDARY_DECLARATION);
-        }
-        // 灰区/可疑输入（P4-17 §6.2）：注入系统侧警戒语元指令（不改写用户消息）
-        String safetyNotice = SafetyContextHolder.current();
-        if (safetyNotice != null && !safetyNotice.isBlank()) {
-            sb.append("\n\n").append(safetyNotice);
-        }
-
         if (!mountedSkills.isEmpty()) {
             sb.append("\n\n【已挂载技能】\n");
             for (Skill skill : mountedSkills) {
@@ -370,6 +404,26 @@ public class AgentFactory {
                     sb.append(skill.systemPrompt()).append("\n");
                 }
             }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 拼动态 System Message：给定人设块 +（安全边界声明）+（灰区警戒语）。
+     *
+     * 安全边界声明无法预知本轮是否真的会召回 RAG/调用工具（RAG 在链内执行、工具由模型决定），
+     * 因此 untrusted-wrap 开启时恒定拼入（约 80 token，换防御确定性，不做省 token 的条件优化）。
+     */
+    private String buildSystemMessage(String personaBlock) {
+        StringBuilder sb = new StringBuilder(personaBlock);
+
+        if (safetyProperties.isEnabled() && safetyProperties.isUntrustedWrap()) {
+            sb.append(SAFETY_BOUNDARY_DECLARATION);
+        }
+        // 灰区/可疑输入（P4-17 §6.2）：注入系统侧警戒语元指令（不改写用户消息）
+        String safetyNotice = SafetyContextHolder.current();
+        if (safetyNotice != null && !safetyNotice.isBlank()) {
+            sb.append("\n\n").append(safetyNotice);
         }
 
         String result = sb.toString();

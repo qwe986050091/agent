@@ -96,7 +96,7 @@ public class SubAgentFactory {
                 def.getName(), description, runner, maxDelegationsPerTurn, maxTaskChars);
         log.info("[SubAgent] 技能「{}」装配为子代理，私有工具 {} 个，RAG={}，委派工具名 {}",
                 def.getName(), subTools.size(), augmentor != null, provider.toolName());
-        return new SubAgentSkill(def, provider);
+        return new SubAgentSkill(def, provider, subTools);
     }
 
     /**

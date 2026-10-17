@@ -14,20 +14,37 @@ import java.util.List;
  *   - {@code systemPrompt()} 是「往主 Agent 系统提示里拼的委派指引」，说明何时、如何委派该子代理。
  *
  * 主 Agent 侧仍是单条推理循环：它看到的只是一个普通工具，是否委派由它自己决定。
+ *
+ * 另供路由（Router）模式取用：{@link #specialistSystemPrompt()} 是该专家自身的系统提示，
+ * {@link #privateTools()} 是其私有工具 —— 命中路由时直接把这两者挂到主 Agent 上，
+ * 复用同一条流式/记忆/RAG/审批链路，无需另建运行时。
  */
 public class SubAgentSkill implements Skill {
 
     private final SkillDefinition definition;
     private final SubAgentToolProvider provider;
+    /** 该专家的私有工具（委派模式下归子代理内部使用；路由模式下直接挂主 Agent） */
+    private final List<Object> privateTools;
 
-    public SubAgentSkill(SkillDefinition definition, SubAgentToolProvider provider) {
+    public SubAgentSkill(SkillDefinition definition, SubAgentToolProvider provider, List<Object> privateTools) {
         this.definition = definition;
         this.provider = provider;
+        this.privateTools = privateTools == null ? List.of() : List.copyOf(privateTools);
     }
 
     /** 主 Agent 可见的委派工具名（delegate_{name}） */
     public String delegateToolName() {
         return provider.toolName();
+    }
+
+    /** 专家自身的系统提示（路由模式下作为本轮主 Agent 的身份提示） */
+    public String specialistSystemPrompt() {
+        return definition.getSystemPrompt() == null ? "" : definition.getSystemPrompt();
+    }
+
+    /** 专家的私有工具（路由模式下直接挂到主 Agent） */
+    public List<Object> privateTools() {
+        return privateTools;
     }
 
     @Override
