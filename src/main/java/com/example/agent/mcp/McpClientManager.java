@@ -4,6 +4,8 @@ import com.example.agent.approval.ApprovalGate;
 import com.example.agent.approval.ApprovalMode;
 import com.example.agent.mcp.McpProperties.Server;
 import com.example.agent.skill.Skill;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.mcp.McpToolProvider;
 import dev.langchain4j.mcp.client.DefaultMcpClient;
@@ -35,6 +37,13 @@ import java.util.concurrent.ConcurrentHashMap;
 public class McpClientManager {
 
     private static final Logger log = LoggerFactory.getLogger(McpClientManager.class);
+
+    /** 注入给需要按用户隔离数据的 MCP 工具的隐藏参数名（与 Go 侧 kb_search 约定一致） */
+    static final String USER_ID_FIELD = "user_id";
+    /** 记忆键分隔符：userId::conversationId（见 AgentFactory.AgentChatRequest#memoryId） */
+    static final String MEMORY_ID_SEPARATOR = "::";
+    /** 仅用于改写工具参数 JSON，不做任何类型绑定 */
+    private static final ObjectMapper ARGS_MAPPER = new ObjectMapper();
 
     /** 校验通过的启用配置（name → config），保持 yml 顺序 */
     private final Map<String, Server> configs = new LinkedHashMap<>();
@@ -129,18 +138,69 @@ public class McpClientManager {
     /** 工具执行器包装：confirm 策略 → 每次人工确认（可被会话授权放行）；auto → 直接放行 */
     private ToolExecutor approvalAwareExecutor(ToolExecutor delegate, Server cfg) {
         boolean auto = isAutoApprove(cfg);
+        boolean injectUserId = cfg.isInjectUserId();
         return (ToolExecutionRequest request, Object memoryId) -> {
+            // 按用户隔离的 Server：把当前会话用户注入到隐藏参数 user_id（模型看不到，也无法伪造）
+            ToolExecutionRequest effective = injectUserId ? withUserId(request, memoryId) : request;
             if (!auto) {
                 // 审批/授权键命名空间化：mcp:{server}:{tool}，避免跨 server/内置同名工具串用授权
-                String approvalKey = "mcp:" + cfg.getName() + ":" + request.name();
-                String displayName = "MCP 工具（" + cfg.getName() + "/" + request.name() + "）";
+                String approvalKey = "mcp:" + cfg.getName() + ":" + effective.name();
+                String displayName = "MCP 工具（" + cfg.getName() + "/" + effective.name() + "）";
                 com.example.agent.approval.ToolRiskPolicy.Policy policy =
                         new com.example.agent.approval.ToolRiskPolicy.Policy(
                                 ApprovalMode.CONFIRM, "high", displayName);
-                ApprovalGate.requireConfirmation(approvalKey, request.arguments(), policy);
+                ApprovalGate.requireConfirmation(approvalKey, effective.arguments(), policy);
             }
-            return delegate.execute(request, memoryId);
+            return delegate.execute(effective, memoryId);
         };
+    }
+
+    /**
+     * 把当前会话用户标识写进工具参数的隐藏字段 user_id。
+     *
+     * 该字段不在任何工具的 inputSchema 中公开，模型既看不到也构造不出来；
+     * 写入时一律覆盖，因此即使模型臆造了 user_id 也不生效 —— 服务端身份为准。
+     * 参数不是 JSON 对象或解析失败时原样回退，绝不让注入失败拖垮工具调用。
+     */
+    static ToolExecutionRequest withUserId(ToolExecutionRequest request, Object memoryId) {
+        String userId = userIdOf(memoryId);
+        if (userId.isEmpty()) {
+            return request;
+        }
+        try {
+            ObjectNode node = request.arguments() == null || request.arguments().isBlank()
+                    ? ARGS_MAPPER.createObjectNode()
+                    : (ObjectNode) ARGS_MAPPER.readTree(request.arguments());
+            node.put(USER_ID_FIELD, userId);
+            return ToolExecutionRequest.builder()
+                    .id(request.id())
+                    .name(request.name())
+                    .arguments(ARGS_MAPPER.writeValueAsString(node))
+                    .build();
+        } catch (Exception e) {
+            log.warn("[MCP] 注入 user_id 失败，按原始参数执行: {}", e.toString());
+            return request;
+        }
+    }
+
+    /**
+     * 从记忆键里还原真实 userId（S6 端到端实测踩坑，2026-10-17）。
+     *
+     * 工具执行器拿到的 memoryId 是记忆键 `userId::conversationId`
+     * （见 AgentFactory.AgentChatRequest#memoryId），而知识库/RAG 的数据隔离用的是
+     * **裸 userId**（AgentFactory 里 retrieverFor(request.userId())）。两者直接混用会让
+     * 注入值带上会话后缀（如 `zlf::9001`），检索恒为 0 命中。
+     *
+     * 按**最后一次** "::" 切分取前缀：conversationId 恒为纯数字，故该切分对含 "::" 的
+     * userId 也成立；无分隔符时整串即 userId，空前缀（如 "::0"）则不注入。
+     */
+    static String userIdOf(Object memoryId) {
+        if (memoryId == null) {
+            return "";
+        }
+        String raw = String.valueOf(memoryId).trim();
+        int idx = raw.lastIndexOf(MEMORY_ID_SEPARATOR);
+        return idx >= 0 ? raw.substring(0, idx).trim() : raw;
     }
 
     private static boolean isAutoApprove(Server cfg) {

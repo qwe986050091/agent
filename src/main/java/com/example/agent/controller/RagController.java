@@ -12,17 +12,20 @@ import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.util.List;
 
 /**
- * RAG 索引接口（由业务后端 backend 调用，不直接面向前端）
+ * RAG 索引与检索接口（由业务后端 backend 与 MCP 工具 kb_search 调用，不直接面向前端）
  *
  * 接口一览：
  *   POST /api/agent/rag/index-document      索引一篇纯文本文档（切块 + 向量化）
  *   POST /api/agent/rag/index-file          索引一个二进制文档（Tika 抽正文：PDF/Word/Excel/PPT/HTML）
  *   POST /api/agent/rag/index-conversation  索引一条对话消息（长期记忆）
  *   POST /api/agent/rag/remove-document     删除某文档的全部向量片段
+ *   POST /api/agent/rag/search              按用户检索知识库（复用混合检索 + RRF + 重排，P0-A / S5）
  *
- * 检索不提供独立接口：检索在对话时由 AgentFactory 通过 ContentRetriever 自动完成。
+ * 对话内的知识注入仍由 AgentFactory 通过 ContentRetriever 自动完成，
+ * /search 只是为外部调用方（MCP Server 的 kb_search 工具）提供同一套检索能力的显式入口。
  */
 @RestController
 @RequestMapping("/api/agent/rag")
@@ -34,6 +37,28 @@ public class RagController {
 
     public RagController(RagService ragService) {
         this.ragService = ragService;
+    }
+
+    /** 检索知识库：body {userId, query, topK}；userId 为空时按 default 用户检索 */
+    @PostMapping("/search")
+    public ResponseEntity<?> search(@RequestBody SearchRequest request) {
+        if (request == null || request.getQuery() == null || request.getQuery().isBlank()) {
+            return ResponseEntity.badRequest()
+                    .body(new ErrorResponse("BAD_REQUEST", "query 不能为空"));
+        }
+        String uid = (request.getUserId() == null || request.getUserId().isBlank())
+                ? "default" : request.getUserId();
+        int topK = request.getTopK() == null ? RagService.DEFAULT_SEARCH_TOP_K : request.getTopK();
+        try {
+            return ResponseEntity.ok(new SearchResult(ragService.search(uid, request.getQuery(), topK)));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(new ErrorResponse("RAG_UNAVAILABLE", e.getMessage()));
+        } catch (Exception e) {
+            log.error("[RAG] 独立检索失败", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(new ErrorResponse("SEARCH_FAILED", "知识库检索失败: " + e.getMessage()));
+        }
     }
 
     /** 索引文档：body {userId, docId, name, text} */
@@ -151,6 +176,25 @@ public class RagController {
     }
 
     // ==================== DTO ====================
+
+    public static class SearchRequest {
+        private String userId;
+        private String query;
+        private Integer topK;
+        public String getUserId() { return userId; }
+        public void setUserId(String userId) { this.userId = userId; }
+        public String getQuery() { return query; }
+        public void setQuery(String query) { this.query = query; }
+        public Integer getTopK() { return topK; }
+        public void setTopK(Integer topK) { this.topK = topK; }
+    }
+
+    /** 检索响应：{items:[...]}，字段与 MCP 工具 kb_search 的解析约定一致 */
+    public static class SearchResult {
+        private final List<RagService.RagHit> items;
+        public SearchResult(List<RagService.RagHit> items) { this.items = items; }
+        public List<RagService.RagHit> getItems() { return items; }
+    }
 
     public static class RemoveDocumentRequest {
         private String docId;

@@ -20,6 +20,7 @@ import java.util.Map;
  *         transport: http                 # http = Streamable HTTP；stdio = 本地子进程
  *         url: http://127.0.0.1:3001/mcp
  *         approval: confirm               # confirm（默认，每次人工确认）| auto（自动放行）
+ *         injectUserId: true              # 向工具参数注入隐藏的 user_id（按用户隔离的工具需要）
  *         description: 示例 MCP Server
  *       - name: fs
  *         transport: stdio
@@ -55,6 +56,12 @@ public class McpProperties {
         /** confirm（默认，每工具人工确认）/ auto（自动放行，仅用于可信内网 server） */
         private String approval = "confirm";
         private boolean enabled = true;
+        /**
+         * 是否把当前会话用户标识注入到工具参数的隐藏字段 user_id。
+         * 默认 false：第三方 MCP Server 不该收到额外的未知参数。
+         * 仅对「需要按用户隔离数据」的自研 Server（如 mcp-server-go 的 kb_search）开启。
+         */
+        private boolean injectUserId = false;
 
         public String getName() { return name; }
         public void setName(String name) { this.name = name; }
@@ -72,5 +79,7 @@ public class McpProperties {
         public void setApproval(String approval) { this.approval = approval; }
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public boolean isInjectUserId() { return injectUserId; }
+        public void setInjectUserId(boolean injectUserId) { this.injectUserId = injectUserId; }
     }
 }

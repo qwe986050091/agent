@@ -94,10 +94,29 @@ agent:
       sudo-wrapper: ${CODE_SANDBOX_WRAPPER:/opt/agent-sandbox/run-sandbox}
       python-command: ${CODE_PYTHON:}  # direct 模式解释器；留空=Linux /usr/bin/python3、其他平台 python
   # ===== MCP（Model Context Protocol）外部工具生态 =====
-  # 默认空列表：功能休眠。配置后每个 server 生成内置技能 mcp:{name}，用户挂载后其工具动态可用。
+  # 每个 server 生成内置技能 mcp:{name}，backend 启动时同步进 skill 表，用户挂载后其工具动态可用。
   mcp:
-    servers: []
-    # Streamable HTTP 示例：
+    servers:
+      # 自研 Go MCP Server（P0-A / S6）：源码 d:\code\mcp-server-go，工具 web_search / web_fetch / kb_search / code_run / calc。
+      # 本段走 Streamable HTTP，连本机常驻 systemd 服务 mcp-server-go（127.0.0.1:3001，unit 内含 AGENT_INTERNAL_TOKEN）。
+      - name: goweb
+        transport: http
+        url: http://127.0.0.1:3001/mcp
+        approval: auto                 # 先 auto 打通链路，验收后再按需改 confirm
+        injectUserId: true             # kb_search 需要按用户隔离，注入隐藏参数 user_id
+        description: Go MCP Server（Streamable HTTP）：网页搜索/抓取、知识库检索、代码沙箱、计算
+      # 同一二进制的 stdio 链路：由 agent 直接拉起子进程，继承 agent 进程环境（含内部口令），无需额外配置。
+      # 与 goweb 工具完全一致，双配是为了同时验证两条 MCP 传输链路（S6 已实测 stdio 可用）。
+      - name: gostdio
+        transport: stdio
+        command: ["/opt/agent/mcp-server-go", "--transport", "stdio"]
+        approval: auto                 # 与 goweb 保持一致，避免同一套工具出现两种审批行为
+        injectUserId: true
+        description: Go MCP Server（stdio）：与 goweb 同一套工具
+      # 安全提示：两个 server 目前都是 auto（受信的本机回环服务，工具有 SSRF 防护、代码沙箱无网络）。
+      # 若将来给该机器装上 Docker（code_run 具备真实沙箱执行能力），应把对应 server 改成
+      # approval: confirm —— MCP 的审批粒度是「按 server」而非按工具，只读工具可用「记住本次授权」免二次确认。
+    # 其它 server 示例（列表为空即功能休眠）：
     # - name: everything
     #   transport: http                 # http = Streamable HTTP；stdio = 本地子进程
     #   url: http://127.0.0.1:3001/mcp

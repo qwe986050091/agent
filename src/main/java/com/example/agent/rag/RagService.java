@@ -9,7 +9,9 @@ import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.embedding.onnx.bgesmallzhv15q.BgeSmallZhV15QuantizedEmbeddingModel;
 import dev.langchain4j.model.output.Response;
+import dev.langchain4j.rag.content.Content;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
+import dev.langchain4j.rag.query.Query;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import dev.langchain4j.store.embedding.filter.MetadataFilterBuilder;
 import dev.langchain4j.store.embedding.inmemory.InMemoryEmbeddingStore;
@@ -63,6 +65,11 @@ public class RagService {
     public static final String META_CHANNEL = "_channel";
     /** 片段 metadata 键：Rerank 精排分（raw logit，P1-9.3，临时写入副本） */
     public static final String META_RERANK_SCORE = "_rerankScore";
+
+    /** 独立检索接口（MCP 工具 kb_search）允许的条数上限，与 Go 侧 MaxTopK 对齐 */
+    public static final int MAX_SEARCH_TOP_K = 10;
+    /** 独立检索接口未指定 topK 时的默认条数 */
+    public static final int DEFAULT_SEARCH_TOP_K = 5;
 
     private final EmbeddingStore<TextSegment> embeddingStore;
     /** 向量快照文件路径（null 表示不落盘） */
@@ -225,6 +232,95 @@ public class RagService {
         }
         return new HybridContentRetriever(model, embeddingStore, keywordSearcher,
                 rerankScorer, userId, searchProperties);
+    }
+
+    /**
+     * 按用户独立检索知识库（供 MCP 工具 kb_search 调用，P0-A / S5）。
+     *
+     * 完全复用对话链路的混合检索：向量 + 关键词双路粗召 → RRF 融合 → Rerank 精排，
+     * 只把「最终条数」替换成本次请求的 topK；因此检索质量与对话内注入的知识上下文同源。
+     *
+     * @return 命中片段（含 score/channel/rerankScore 观测字段），无命中返回空列表
+     * @throws IllegalStateException RAG 不可用（embedding 模型未成功加载）
+     */
+    public List<RagHit> search(String userId, String query, int topK) {
+        if (query == null || query.isBlank()) {
+            return List.of();
+        }
+        EmbeddingModel model = requireModel();
+        RagSearchProperties props = new RagSearchProperties(clampTopK(topK),
+                searchProperties.minScore(),
+                searchProperties.candidateMinScore(),
+                searchProperties.vectorTopK(),
+                searchProperties.keywordTopK(),
+                searchProperties.hybrid());
+        List<Content> contents = new HybridContentRetriever(model, embeddingStore, keywordSearcher,
+                rerankScorer, userId, props).retrieve(Query.from(query));
+        List<RagHit> hits = new ArrayList<>(contents.size());
+        for (Content content : contents) {
+            hits.add(toHit(content));
+        }
+        log.info("[RAG] 独立检索：用户 {} 查询「{}」topK={} 命中 {} 条", userId, query, props.maxResults(), hits.size());
+        return hits;
+    }
+
+    /** topK 归一：非正数取默认值，超过上限夹到上限（包级可见便于单测）。 */
+    static int clampTopK(int topK) {
+        if (topK <= 0) {
+            return DEFAULT_SEARCH_TOP_K;
+        }
+        return Math.min(topK, MAX_SEARCH_TOP_K);
+    }
+
+    /** 把检索片段映射为对外命中结构；字段名与 MCP 工具 kb_search 的约定一一对应。 */
+    static RagHit toHit(Content content) {
+        TextSegment segment = content.textSegment();
+        Metadata metadata = segment == null ? null : segment.metadata();
+        return new RagHit(
+                segment == null ? "" : segment.text(),
+                str(metadata, META_SOURCE),
+                str(metadata, META_DOC_ID),
+                asInteger(raw(metadata, META_CHUNK_INDEX)),
+                asDouble(raw(metadata, META_SCORE)),
+                str(metadata, META_CHANNEL),
+                asDouble(raw(metadata, META_RERANK_SCORE)),
+                str(metadata, META_TYPE));
+    }
+
+    /**
+     * 容错读取 metadata 原始值。
+     * 刻意走 {@code toMap()} 而不是 getString/getDouble：检索观测字段可能缺失，
+     * 且强类型 getter 在类型不符时会抛 ClassCastException —— 检索接口不该因此 500。
+     */
+    private static Object raw(Metadata metadata, String key) {
+        return metadata == null ? null : metadata.toMap().get(key);
+    }
+
+    private static String str(Metadata metadata, String key) {
+        Object value = raw(metadata, key);
+        return value == null ? null : String.valueOf(value);
+    }
+
+    private static Double asDouble(Object value) {
+        return value instanceof Number number ? number.doubleValue() : null;
+    }
+
+    private static Integer asInteger(Object value) {
+        return value instanceof Number number ? number.intValue() : null;
+    }
+
+    /**
+     * 独立检索命中（对外 DTO）。
+     * chunkIndex / score / channel / rerankScore 是检索期观测字段，缺失时为 null。
+     */
+    public record RagHit(String text,
+                         String source,
+                         String docId,
+                         Integer chunkIndex,
+                         Double score,
+                         String channel,
+                         Double rerankScore,
+                         String type) {
     }
 
     // ==================== 内部方法 ====================
