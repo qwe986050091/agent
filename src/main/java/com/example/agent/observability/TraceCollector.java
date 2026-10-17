@@ -79,6 +79,8 @@ public class TraceCollector {
     private String model;
     private boolean fallback = false;
     private int llmErrors = 0;
+    /** 本回合子代理委派次数（Agent-as-Tool 的「全局预算」计数：多子代理 fan-out 的成本闸门） */
+    private int delegations = 0;
 
     private TraceCollector(String traceId, String userId, Long conversationId,
                            Consumer<TraceEvent> sink, AgentMetricsSink metrics) {
@@ -113,6 +115,7 @@ public class TraceCollector {
         this.usagePresent = false;
         this.model = null;
         this.llmErrors = 0;
+        this.delegations = 0;
         this.pendingTools.clear();
         this.completedToolIds.clear();
         this.fifoSeq = 0;
@@ -246,6 +249,13 @@ public class TraceCollector {
 
     public boolean usagePresent() { return usagePresent; }
     public int llmErrors() { return llmErrors; }
+
+    /** 本回合已发生的子代理委派次数（Agent-as-Tool 全局预算：与单循环轮次上限共同约束总成本） */
+    public int delegations() { return delegations; }
+
+    /** 记录一次子代理委派（由 SubAgentToolProvider 在执行委派前调用） */
+    public void recordDelegation() { delegations++; }
+
     public List<ToolTraceEvent> tools() { return List.copyOf(tools); }
     public List<RagTraceEvent> retrievals() { return List.copyOf(retrievals); }
     public List<SafetyTraceEvent> safeties() { return List.copyOf(safeties); }

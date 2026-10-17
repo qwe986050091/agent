@@ -1,5 +1,6 @@
 package com.example.agent.skill;
 
+import com.example.agent.agent.SubAgentFactory;
 import com.example.agent.mcp.McpClientManager;
 import com.example.agent.tools.ToolRegistry;
 import org.junit.jupiter.api.BeforeEach;
@@ -27,6 +28,7 @@ class SkillManagerResolveTest {
     private ToolRegistry toolRegistry;
     private SkillManager skillManager;
     private Skill builtinSkill;
+    private SubAgentFactory subAgentFactory;
 
     @BeforeEach
     void setUp() {
@@ -34,8 +36,12 @@ class SkillManagerResolveTest {
         McpClientManager mcpClientManager = mock(McpClientManager.class);
         when(mcpClientManager.skills()).thenReturn(List.of());
 
+        // 默认以「工具型技能」路径解析；subagent 能力启用但仅 type=agent 才走子代理分支
+        subAgentFactory = mock(SubAgentFactory.class);
+        when(subAgentFactory.isEnabled()).thenReturn(true);
+
         builtinSkill = new StubSkill("calculator");
-        skillManager = new SkillManager(List.of(builtinSkill), toolRegistry, mcpClientManager);
+        skillManager = new SkillManager(List.of(builtinSkill), toolRegistry, mcpClientManager, subAgentFactory);
     }
 
     // ==================== 内置技能目录 ====================
@@ -46,7 +52,7 @@ class SkillManagerResolveTest {
         Skill mcpSkill = new StubSkill("mcp:weather");
         when(mcp.skills()).thenReturn(List.of(mcpSkill));
 
-        SkillManager manager = new SkillManager(List.of(builtinSkill), toolRegistry, mcp);
+        SkillManager manager = new SkillManager(List.of(builtinSkill), toolRegistry, mcp, subAgentFactory);
 
         // MCP 动态技能（mcp:{server}）与代码内置技能同在一个目录里
         assertThat(manager.builtinSkillNames()).containsExactly("calculator", "mcp:weather");
@@ -151,6 +157,48 @@ class SkillManagerResolveTest {
                 definition("dup", "toolA"), definition("dup", "toolA")));
 
         assertThat(resolved).hasSize(2);
+    }
+
+    // ==================== 子代理（Agent-as-Tool）分支 ====================
+
+    @Test
+    void agentTypeSkillIsBuiltAsSubAgentNotPlainTools() {
+        SkillDefinition def = definition("researcher", "webSearchTools");
+        def.setType(SkillDefinition.TYPE_AGENT);
+        Skill subAgent = mock(Skill.class);
+        when(subAgentFactory.buildAgentSkill(def)).thenReturn(subAgent);
+
+        List<Skill> resolved = skillManager.resolveSkills(List.of(def));
+
+        // type=agent 走子代理分支：交给 SubAgentFactory 构建，而非把私有工具直挂主 Agent
+        assertThat(resolved).containsExactly(subAgent);
+    }
+
+    @Test
+    void agentTypeFallsBackToPlainSkillWhenSubAgentDisabled() {
+        when(subAgentFactory.isEnabled()).thenReturn(false);
+        Object toolA = new Object();
+        when(toolRegistry.getTool("toolA")).thenReturn(toolA);
+        SkillDefinition def = definition("downgraded", "toolA");
+        def.setType(SkillDefinition.TYPE_AGENT);
+
+        Skill skill = skillManager.resolveSkills(List.of(def)).get(0);
+
+        // 子代理能力关闭：退化为普通技能（工具直挂主 Agent），保证可用性不因开关而丢失
+        assertThat(skill).isInstanceOf(ConfigurableSkill.class);
+        assertThat(skill.tools()).containsExactly(toolA);
+    }
+
+    @Test
+    void typeToolIsNotTreatedAsAgent() {
+        Object toolA = new Object();
+        when(toolRegistry.getTool("toolA")).thenReturn(toolA);
+        SkillDefinition def = definition("plain", "toolA");
+        def.setType(SkillDefinition.TYPE_TOOL);
+
+        Skill skill = skillManager.resolveSkills(List.of(def)).get(0);
+
+        assertThat(skill).isInstanceOf(ConfigurableSkill.class);
     }
 
     // ==================== 测试夹具 ====================

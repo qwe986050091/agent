@@ -21,6 +21,7 @@ import java.util.Set;
  *   1. 持有平台<b>内置 Skill</b> 目录（Spring 注入的 Skill Bean，代码为权威，如 calculator/datetime）
  *   2. 每次对话请求时，按 backend 传入的已挂载 Skill 定义（SkillDefinition 列表）解析出本次生效的 Skill：
  *      - 名称命中内置 Skill → 直接使用内置实例（其 systemPrompt/tools 以代码为准）
+ *      - type=agent 的自定义 Skill → 构建为子代理（Agent-as-Tool：主 Agent 只看到一个委派工具）
  *      - 其余为用户自定义 Skill → 按 toolNames 从 {@link ToolRegistry} 解析工具，构建 {@link ConfigurableSkill}
  *
  * 无状态化说明：自定义 Skill 元数据与用户挂载关系统一由 backend 的 MySQL 为权威来源，
@@ -36,10 +37,14 @@ public class SkillManager {
     private final Map<String, Skill> builtinSkills = new LinkedHashMap<>();
 
     private final ToolRegistry toolRegistry;
+    /** 子代理工厂：把 type=agent 的技能构建成主代理可委派的子代理（Agent-as-Tool） */
+    private final com.example.agent.agent.SubAgentFactory subAgentFactory;
 
     public SkillManager(List<Skill> builtinSkillBeans, ToolRegistry toolRegistry,
-                        com.example.agent.mcp.McpClientManager mcpClientManager) {
+                        com.example.agent.mcp.McpClientManager mcpClientManager,
+                        com.example.agent.agent.SubAgentFactory subAgentFactory) {
         this.toolRegistry = toolRegistry;
+        this.subAgentFactory = subAgentFactory;
         for (Skill skill : builtinSkillBeans) {
             builtinSkills.put(skill.name(), skill);
         }
@@ -94,6 +99,11 @@ public class SkillManager {
             if (builtin != null) {
                 // 内置技能：以代码中的定义为准（backend 元数据行可能只有名称）
                 result.add(builtin);
+                continue;
+            }
+            if (def.isAgentType() && subAgentFactory != null && subAgentFactory.isEnabled()) {
+                // 子代理技能（Agent-as-Tool）：主 Agent 只看到一个委派工具，私有工具归子代理
+                result.add(subAgentFactory.buildAgentSkill(def));
                 continue;
             }
             result.add(buildConfigurable(def));
