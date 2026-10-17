@@ -362,8 +362,8 @@ public class AgentFactory {
         return new ObservabilityRetriever(ragService.retrieverOf(userId));
     }
 
-    /** 一轮对话的装配方案：系统提示 + 直挂工具 + 动态工具提供者 */
-    private record TurnPlan(String systemMessage, Object[] tools, List<ToolProvider> toolProviders) {
+    /** 一轮对话的装配方案：系统提示 + 直挂工具 + 动态工具提供者（包可见以便装配单测） */
+    record TurnPlan(String systemMessage, Object[] tools, List<ToolProvider> toolProviders) {
     }
 
     /**
@@ -372,7 +372,7 @@ public class AgentFactory {
      *      用专家身份提示 + 其私有工具，不进入 Supervisor（不挂委派工具）；
      *   2. 否则 → 默认主 Agent（Supervisor）：人设 + 各技能委派指引 + 全部技能工具 + 动态 ToolProvider。
      */
-    private TurnPlan planTurn(AgentChatRequest request, List<Skill> mountedSkills) {
+    TurnPlan planTurn(AgentChatRequest request, List<Skill> mountedSkills) {
         List<SubAgentSkill> specialists = specialistsOf(mountedSkills);
         SubAgentSkill routed = routeToSpecialist(request, specialists);
         if (routed != null) {

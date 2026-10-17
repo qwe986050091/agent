@@ -49,7 +49,7 @@ agent:
     enabled: false                   # 默认关闭；开启后每轮多一次轻量判定调用（判定模型复用主模型）
   # ===== fan-out（并行扇出）：一轮内并发派发多个子代理并合并结果 =====
   fanout:
-    enabled: false                   # 默认关闭；开启后 Supervisor 模式挂上 delegate_parallel 工具
+    enabled: true                    # 开启：Supervisor 模式挂上 delegate_parallel 工具
     max-parallel: 3                  # 并发执行的子代理上限（有界线程池大小）
     per-task-timeout-seconds: 120    # 单个子任务超时（必须大于 agent.approval.timeout-seconds：子代理可能等人工确认）
   # ===== 高危工具人工确认（human-in-the-loop） =====
