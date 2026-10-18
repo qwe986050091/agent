@@ -25,6 +25,8 @@ import java.util.Set;
  *
  * - doChat/chat 入参消息尾部若为 ToolExecutionResultMessage → 配对完成上一轮工具；
  * - 每轮完整响应：toolExecutionRequests 入 pending、TokenUsage 累加、轮次+1；
+ * - 每轮 onCompleteResponse（内联工具执行点）前后绑定/清理 ThreadLocal（采集器 + 审批闸门），
+ *   使该线程上执行的委派/扇出工具、以及同步运行的子代理能取到 trace 与审批上下文；
  * - 回调原样转发给业务 handler（token/最终答案/错误不受影响）。
  *
  * 指标（LLM 耗时/成败）仍由模型 bean 上的 {@link ObservabilityChatModelListener} 负责；
@@ -129,21 +131,32 @@ public class TraceAwareStreamingChatModel implements StreamingChatModel {
                 } catch (Exception ignored) {
                     // 采集异常不影响答案回传
                 }
-                // 工具在本回调线程内联执行：绑定请求级审批上下文，执行完立即清理
+                // 工具在本回调线程内联执行：绑定请求级 trace 上下文 + 审批上下文，执行完立即恢复/清理。
+                // 二者都是 ThreadLocal（不会跨线程传递），若不在此处绑定：
+                //   - 委派/扇出工具取不到采集器 → 子代理 LLM 用量与 tool 事件丢失、回合委派预算空转；
+                //   - 子代理在本线程同步推理，其内部工具/模型回调同样看不到采集器；
+                //   - 高危工具取不到审批闸门 → deny-by-default 直接拒绝。
                 // （工具线程可能阻塞等待用户审批，期间占用模型 HTTP 回调线程，属预期内）
-                ApprovalGate previous = ApprovalContextHolder.current();
-                if (approvalGate != null) {
-                    ApprovalContextHolder.start(approvalGate);
+                TraceCollector previousCollector = collector == null ? null : TraceContextHolder.current();
+                ApprovalGate previousGate = ApprovalContextHolder.current();
+                if (collector != null) {
+                    TraceContextHolder.bind(collector, collector.traceId());
                 }
+                ApprovalContextHolder.start(approvalGate);
                 try {
                     original.onCompleteResponse(response);
                 } finally {
-                    if (approvalGate != null) {
-                        if (previous != null) {
-                            ApprovalContextHolder.start(previous);
+                    if (collector != null) {
+                        if (previousCollector != null) {
+                            TraceContextHolder.bind(previousCollector, previousCollector.traceId());
                         } else {
-                            ApprovalContextHolder.clear();
+                            TraceContextHolder.unbind();
                         }
+                    }
+                    if (previousGate != null) {
+                        ApprovalContextHolder.start(previousGate);
+                    } else {
+                        ApprovalContextHolder.clear();
                     }
                 }
             }
