@@ -213,6 +213,21 @@ rag:
     model-file: model_quantized.onnx
     tokenizer-file: tokenizer.json
 
+# ===== Agent 评测（P0-B）：默认关闭 =====
+# 只有显式开启才会跑评测 CLI（普通 web 运行绝不触发）：
+#   java -jar simple-agent.jar --spring.profiles.active=eval
+# 完整可调项见 eval/EvalProperties 与 application-eval.yml
+eval:
+  enabled: false                # 总开关（eval profile 会置 true）
+  dataset: classpath:eval/dataset/agent-eval-v1.json
+  mode: in-process              # in-process | http（对已部署 agent 打 HTTP）
+  output-dir: target/eval
+  judge-enabled: false          # LLM-as-judge，默认关（CI 离线档恒关）
+  repetitions: 1
+  # 上报 backend 落库 + admin 看板（留空则只出本地报告）
+  persist-url: ""
+  persist-token: ${EVAL_INGEST_TOKEN:dev-internal-token}
+
 # ===== 日志配置 =====
 logging:
   level:

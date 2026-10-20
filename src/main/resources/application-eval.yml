@@ -1,0 +1,29 @@
+# ===== 评测专用 profile（P0-B）=====
+# 用途：java -jar simple-agent.jar --spring.profiles.active=eval
+#   （或本地）.\mvnw.cmd spring-boot:run "-Dspring-boot.run.profiles=eval"
+# 特点：以「无 Web 容器」的方式启动，跑完评测 CLI 后进程自动退出。
+spring:
+  main:
+    web-application-type: none
+
+eval:
+  enabled: true
+  dataset: classpath:eval/dataset/agent-eval-v1.json
+  dataset-name: agent-eval-v1
+  mode: in-process
+  user-id: eval-runner
+  output-dir: target/eval
+  label: local
+  # RAG 评测知识库夹具：跑前索引进评测用户向量库，保证 rag_qa 用例可复现
+  kb-fixture: classpath:eval/dataset/kb-ecommerce-fixture.json
+
+agent:
+  # 评测不依赖外部 MCP Server；置空避免启动时连不上的噪音
+  mcp:
+    servers: []
+  # 评测在「规则单闸 block」下跑安全用例（确定性）：
+  # 关闭 L2 语义分类器后，block 判定 = L1 规则分 >= 阈值，等价于生产分类器显式关闭的行为
+  safety:
+    mode: block
+    llm-classifier:
+      enabled: false

@@ -1,0 +1,68 @@
+# Agent 评测（P0-B）：真实 LLM 全量评测，产物是 Markdown/JSON 报告（含基线 diff）。
+#
+# 为什么不在 PR 上跑真实评测：
+#   真实评测需要 LLM API Key（CI 上无 secret 则无法启动 agent），且模型有抖动、
+#   会产生费用——放进 PR 门禁会造成「因模型抖动误红」的 flaky。
+#   因此 PR 门禁只跑「离线确定性回归档」（scorer/流水线/数据集 schema 单测，
+#   由 ci.yml 的 `./mvnw -B clean test` 自动覆盖）；真实评测走手动触发 + 每日定时。
+#
+# 需要的仓库配置：
+#   secrets.OPENAI_API_KEY     LLM Key（必填，否则 agent 启动 fail-fast）
+#   secrets.EVAL_INGEST_TOKEN  与 backend app.eval.ingest-token 一致（可选，用于上报落库）
+#   vars.EVAL_PERSIST_URL      backend 上报地址，如 https://<host>/api/eval/runs（可选）
+#   vars.EVAL_BASELINE         agent 仓内基线报告 JSON 路径（可选，用于产出 diff）
+name: agent-eval
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: 本次运行标签（用于两次运行对比）
+        default: manual
+      mode:
+        description: 调用方式 in-process | http
+        default: in-process
+      base-url:
+        description: http 模式下已部署 agent 的地址
+        required: false
+        default: ''
+  schedule:
+    # 每天 04:00 UTC = 12:00 北京时间
+    - cron: '0 20 * * *'
+concurrency:
+  group: agent-eval
+  cancel-in-progress: false
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      # 评测 CLI 用 jar 启动（--spring.profiles.active=eval）；单测已在 ci.yml 覆盖，这里跳过
+      - name: Package
+        run: ./mvnw -B -DskipTests package
+      - name: Run eval
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # agent 侧 eval.persist-token 默认取 EVAL_INGEST_TOKEN
+          EVAL_INGEST_TOKEN: ${{ secrets.EVAL_INGEST_TOKEN }}
+        run: |
+          JAR=$(ls target/simple-agent-*.jar | head -n1)
+          java -jar "$JAR" \
+            --spring.profiles.active=eval \
+            --eval.mode="${{ inputs.mode || 'in-process' }}" \
+            --eval.label="${{ inputs.label || 'scheduled' }}" \
+            --eval.base-url="${{ inputs.base-url }}" \
+            --eval.persist-url="${{ vars.EVAL_PERSIST_URL }}" \
+            --eval.persist-token="${{ secrets.EVAL_INGEST_TOKEN }}" \
+            --eval.baseline="${{ vars.EVAL_BASELINE }}"
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: target/eval/
+          if-no-files-found: warn
