@@ -108,20 +108,20 @@ public class PlannerToolProvider implements ToolProvider {
         int planTokens = collector == null ? 0 : Math.max(0, collector.totalTokens() - tokensBefore);
 
         if (planOpt.isEmpty()) {
-            record(collector, plannerNodeId, parentId, goal, false,
+            record(collector, plannerNodeId, parentId, PLANNER_AGENT, goal, false,
                     "无法分解为可执行步骤", planDuration, planTokens);
             return "计划编排失败：无法把该目标分解为子任务。请改用 delegate_<子代理> 逐个委派，或直接作答。"
                     + "候选子代理：" + candidateNames();
         }
         AgentPlanner.Plan plan = planOpt.get();
         if (plan.steps().size() > maxSteps) {
-            record(collector, plannerNodeId, parentId, goal, false,
+            record(collector, plannerNodeId, parentId, PLANNER_AGENT, goal, false,
                     "步骤数超过上限 " + maxSteps, planDuration, planTokens);
             return "计划编排失败：分解出 " + plan.steps().size() + " 步，超过上限 " + maxSteps
                     + "。请缩小目标后重试。";
         }
         if (collector != null && collector.delegations() + plan.steps().size() > maxDelegationsPerTurn) {
-            record(collector, plannerNodeId, parentId, goal, false,
+            record(collector, plannerNodeId, parentId, PLANNER_AGENT, goal, false,
                     "委派预算不足", planDuration, planTokens);
             return "计划编排失败：本回合委派预算不足（上限 " + maxDelegationsPerTurn
                     + "，已用 " + collector.delegations() + "，本次需 " + plan.steps().size()
@@ -133,7 +133,8 @@ public class PlannerToolProvider implements ToolProvider {
             }
         }
         // 计划节点：让前端/历史 trace 能还原「谁分解了哪几步」
-        record(collector, plannerNodeId, parentId, goal, true, null, planDuration, planTokens);
+        record(collector, plannerNodeId, parentId, PLANNER_AGENT, goal, true, null,
+                planDuration, planTokens);
 
         List<StepResult> results = new ArrayList<>();
         for (AgentPlanner.PlanStep step : plan.steps()) {
@@ -172,12 +173,12 @@ public class PlannerToolProvider implements ToolProvider {
             AgentScope.Scoped<String> scoped = AgentScope.runScopedDetailed(
                     step.agent(), delegationId, () -> runner.run(task, memoryId));
             String text = scoped.value() == null ? "" : scoped.value();
-            record(collector, delegationId, plannerNodeId, task, true, null,
+            record(collector, delegationId, plannerNodeId, step.agent(), task, true, null,
                     scoped.durationMs(), scoped.tokens());
             return new StepResult(step.agent(), text, true);
         } catch (RuntimeException e) {
             log.warn("[Planner] 步骤「{}」执行失败: {}", step.agent(), e.getMessage());
-            record(collector, delegationId, plannerNodeId, task, false, e.getMessage(),
+            record(collector, delegationId, plannerNodeId, step.agent(), task, false, e.getMessage(),
                     elapsedMs(start), 0);
             return new StepResult(step.agent(), "执行失败：" + e.getMessage(), false);
         }
@@ -227,13 +228,13 @@ public class PlannerToolProvider implements ToolProvider {
                 || s.startsWith("需要修改") || s.startsWith("fail") || s.startsWith("reject");
     }
 
-    private void record(TraceCollector collector, String id, String parentId, String task,
-                        boolean success, String error, long durationMs, int tokens) {
+    private void record(TraceCollector collector, String id, String parentId, String agent,
+                        String task, boolean success, String error, long durationMs, int tokens) {
         if (collector == null) {
             return;
         }
         collector.recordDelegationEvent(new DelegationTraceEvent(
-                id, PLANNER_AGENT, parentId, truncate(task, 300),
+                id, agent, parentId, truncate(task, 300),
                 success, error, durationMs, tokens));
     }
 
