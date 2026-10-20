@@ -28,16 +28,9 @@ import java.util.regex.Pattern;
  *
  * 不参与打分：仅产出"关键词路排名"，与向量路排名在 {@link HybridContentRetriever} 做 RRF 融合。
  */
-public class KeywordSearcher {
+public class KeywordSearcher implements KeywordIndex {
 
     private static final Logger log = LoggerFactory.getLogger(KeywordSearcher.class);
-
-    /** 英文/数字串（允许内部 - _ 连接），长度 >=2 保留，如 Q3、REF-2026-0001 */
-    private static final Pattern ASCII_TOKEN = Pattern.compile("[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*");
-    /** 连续中文片段，内部按 bigram 切 */
-    private static final Pattern CJK_RUN = Pattern.compile("[\\u4e00-\\u9fff]{2,}");
-    /** 切词数量上限，避免长 query 撑出过多 ILIKE 条件 */
-    private static final int MAX_TERMS = 20;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -54,8 +47,24 @@ public class KeywordSearcher {
         this.table = table;
     }
 
-    /** 一条关键词命中：embedding_id 与片段（与向量路按 id 去重融合） */
-    public record KeywordHit(String embeddingId, TextSegment segment) {
+    @Override
+    public String name() {
+        return "pg_trgm";
+    }
+
+    @Override
+    public boolean available() {
+        return true;
+    }
+
+    /** pg_trgm 不需要单独索引：关键词直接查向量表的 text 列（已是同一份数据） */
+    @Override
+    public void indexAll(List<String> ids, List<TextSegment> segments) {
+    }
+
+    /** 向量表按 docId 删除时关键词数据同步消失，无需额外处理 */
+    @Override
+    public void removeByDocId(String docId) {
     }
 
     /**
@@ -63,6 +72,7 @@ public class KeywordSearcher {
      *
      * @param maxResults 关键词路返回条数
      */
+    @Override
     public List<KeywordHit> search(String userId, String query, int maxResults) {
         List<String> terms = buildTerms(query);
         if (terms.isEmpty()) {
@@ -118,29 +128,9 @@ public class KeywordSearcher {
         }
     }
 
-    /**
-     * query → 关键词集合：英文/数字整串（含 - _）+ 中文 bigram，去重，最多 {@link #MAX_TERMS} 个。
-     */
+    /** query → 关键词集合（与 ES 实现共用同一套切词，见 {@link KeywordTerms}） */
     static List<String> buildTerms(String query) {
-        if (query == null || query.isBlank()) {
-            return List.of();
-        }
-        Set<String> terms = new LinkedHashSet<>();
-        Matcher ascii = ASCII_TOKEN.matcher(query);
-        while (ascii.find() && terms.size() < MAX_TERMS) {
-            String t = ascii.group();
-            if (t.length() >= 2) {
-                terms.add(t);
-            }
-        }
-        Matcher cjk = CJK_RUN.matcher(query);
-        while (cjk.find()) {
-            String run = cjk.group();
-            for (int i = 0; i < run.length() - 1 && terms.size() < MAX_TERMS; i++) {
-                terms.add(run.substring(i, i + 2));
-            }
-        }
-        return List.copyOf(terms);
+        return KeywordTerms.build(query);
     }
 
     /** 转义 ILIKE 通配符（% _ 与转义符本身） */

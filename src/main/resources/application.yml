@@ -208,8 +208,16 @@ rag:
     min-score: 0.5           # 纯向量模式相似度下限（0~1）
     candidate-min-score: 0.3 # 混合/精排模式向量粗召下限（放宽以扩大候选，再交 RRF/Rerank 精选）
     vector-top-k: 10         # 向量粗召条数
-    keyword-top-k: 10        # 关键词粗召条数（仅 pgvector + hybrid=true）
-    hybrid: true             # 双路召回（向量+pg_trgm 关键词）；memory 模式自动退化为纯向量
+    keyword-top-k: 10        # 关键词粗召条数（hybrid=true 时生效）
+    hybrid: true             # 双路召回（向量+关键词）；关键词实现不可用时自动退化为纯向量
+  # ===== 关键词检索实现（P1-E）：pg=pg_trgm（默认）| es=Elasticsearch =====
+  # 两者共用同一套切词与片段 id，切 store 即可做召回/延迟对比实验
+  keyword:
+    store: ${RAG_KEYWORD_STORE:pg}
+    es:
+      url: ${RAG_ES_URL:http://127.0.0.1:9200}    # 生产：JD 备机 ES，经 SSH 隧道映射到本机
+      index: ${RAG_ES_INDEX:agent-rag}
+      timeout-ms: 1500
   # ===== Rerank 精排（P1-9.3）：默认休眠，跑 reranker-setup.sh 下模型并置 enabled=true =====
   rerank:
     enabled: ${RAG_RERANK_ENABLED:false}

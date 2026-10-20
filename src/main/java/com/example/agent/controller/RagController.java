@@ -61,6 +61,22 @@ public class RagController {
         }
     }
 
+    /**
+     * 关键词检索探针（P1-E 对比实验）：只跑关键词这一路，返回当前实现（pg_trgm / es）、
+     * 是否可用、耗时与命中，用于两套实现同口径的召回/延迟对比。
+     */
+    @PostMapping("/keyword-probe")
+    public ResponseEntity<?> keywordProbe(@RequestBody SearchRequest request) {
+        if (request == null || request.getQuery() == null || request.getQuery().isBlank()) {
+            return ResponseEntity.badRequest()
+                    .body(new ErrorResponse("BAD_REQUEST", "query 不能为空"));
+        }
+        String uid = (request.getUserId() == null || request.getUserId().isBlank())
+                ? "default" : request.getUserId();
+        int topK = request.getTopK() == null ? RagService.DEFAULT_SEARCH_TOP_K : request.getTopK();
+        return ResponseEntity.ok(ragService.keywordProbe(uid, request.getQuery(), topK));
+    }
+
     /** 索引文档：body {userId, docId, name, text} */
     @PostMapping("/index-document")
     public ResponseEntity<?> indexDocument(@RequestBody IndexDocumentRequest request) {

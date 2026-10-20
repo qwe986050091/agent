@@ -41,14 +41,14 @@ public class HybridContentRetriever implements ContentRetriever {
 
     private final EmbeddingModel embeddingModel;
     private final EmbeddingStore<TextSegment> embeddingStore;
-    private final KeywordSearcher keywordSearcher;
+    private final KeywordIndex keywordSearcher;
     private final RerankScorer rerankScorer;
     private final String userId;
     private final RagSearchProperties props;
 
     public HybridContentRetriever(EmbeddingModel embeddingModel,
                                   EmbeddingStore<TextSegment> embeddingStore,
-                                  KeywordSearcher keywordSearcher,
+                                  KeywordIndex keywordSearcher,
                                   RerankScorer rerankScorer,
                                   String userId,
                                   RagSearchProperties props) {
@@ -64,7 +64,8 @@ public class HybridContentRetriever implements ContentRetriever {
     public List<Content> retrieve(Query query) {
         String queryText = query == null ? "" : query.text();
         try {
-            boolean hybridActive = props.hybrid() && keywordSearcher != null;
+            boolean hybridActive = props.hybrid() && keywordSearcher != null
+                    && keywordSearcher.available();
             boolean rerankActive = rerankScorer != null && rerankScorer.available();
             // 有融合/精排兜底时放宽向量阈值扩大候选；纯向量模式保持严格阈值
             double vectorFloor = (hybridActive || rerankActive)
@@ -96,10 +97,10 @@ public class HybridContentRetriever implements ContentRetriever {
             // ---------- 2. 关键词粗召（pgvector 模式） ----------
             List<String> keywordRank = List.of();
             if (hybridActive) {
-                List<KeywordSearcher.KeywordHit> hits =
+                List<KeywordIndex.KeywordHit> hits =
                         keywordSearcher.search(userId, queryText, props.keywordTopK());
                 keywordRank = new ArrayList<>(hits.size());
-                for (KeywordSearcher.KeywordHit hit : hits) {
+                for (KeywordIndex.KeywordHit hit : hits) {
                     keywordRank.add(hit.embeddingId());
                     Candidate existing = candidates.get(hit.embeddingId());
                     if (existing == null) {

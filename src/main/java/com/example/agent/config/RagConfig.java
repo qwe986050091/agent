@@ -1,6 +1,8 @@
 package com.example.agent.config;
 
 import com.example.agent.rag.DocumentTextExtractor;
+import com.example.agent.rag.EsKeywordIndex;
+import com.example.agent.rag.KeywordIndex;
 import com.example.agent.rag.KeywordSearcher;
 import com.example.agent.rag.RagSearchProperties;
 import com.example.agent.rag.RagService;
@@ -109,12 +111,15 @@ public class RagConfig {
     }
 
     /**
-     * 关键词粗召（P1-9.3）：仅 pgvector 模式装配。建表/迁移完成后再初始化，
+     * 关键词粗召（P1-9.3，默认实现）：仅 pgvector 模式装配。建表/迁移完成后再初始化，
      * 顺手确保 pg_trgm 扩展与 GIN 索引就绪（失败不阻断启动，自动退化为纯向量）。
+     *
+     * P1-E：加 {@code rag.keyword.store=pg}（缺省）才会装配；切到 es 时由下一个 Bean 顶替。
      */
     @Bean
     @ConditionalOnProperty(prefix = "rag", name = "store", havingValue = "pgvector")
-    public KeywordSearcher keywordSearcher(
+    @ConditionalOnProperty(prefix = "rag.keyword", name = "store", havingValue = "pg", matchIfMissing = true)
+    public KeywordIndex keywordSearcher(
             EmbeddingStore<TextSegment> embeddingStore,
             @Value("${rag.pgvector.host:127.0.0.1}") String host,
             @Value("${rag.pgvector.port:5432}") int port,
@@ -128,11 +133,26 @@ public class RagConfig {
         return searcher;
     }
 
+    /**
+     * 关键词粗召（P1-E 对照组）：Elasticsearch 实现，{@code rag.keyword.store=es} 时装配。
+     *
+     * 与 pg_trgm 实现共用切词与 id 口径，可直接切换做召回/延迟对比。
+     * ES 不可达时 available=false，混合检索自动退化为纯向量（不影响对话）。
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "rag.keyword", name = "store", havingValue = "es")
+    public KeywordIndex esKeywordIndex(
+            @Value("${rag.keyword.es.url:http://127.0.0.1:9200}") String url,
+            @Value("${rag.keyword.es.index:agent-rag}") String index,
+            @Value("${rag.keyword.es.timeout-ms:1500}") int timeoutMs) {
+        return new EsKeywordIndex(url, index, timeoutMs);
+    }
+
     @Bean
     public RagService ragService(EmbeddingStore<TextSegment> embeddingStore,
                                  DocumentTextExtractor textExtractor,
                                  RerankScorer rerankScorer,
-                                 org.springframework.beans.factory.ObjectProvider<KeywordSearcher> keywordProvider,
+                                 org.springframework.beans.factory.ObjectProvider<KeywordIndex> keywordProvider,
                                  @Value("${rag.store:memory}") String storeType,
                                  @Value("${rag.store-file:data/rag-embeddings.json}") String storeFile,
                                  @Value("${rag.chunk-size:500}") int chunkSize,

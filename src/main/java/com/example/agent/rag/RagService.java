@@ -80,8 +80,8 @@ public class RagService {
     private final RagSearchProperties searchProperties;
     /** 二进制文档（PDF/Word/Excel/…）正文抽取器（P1-9.2） */
     private final DocumentTextExtractor textExtractor;
-    /** 关键词粗召（仅 pgvector 模式由 RagConfig 注入；memory 模式为 null） */
-    private final KeywordSearcher keywordSearcher;
+    /** 关键词粗召（pg_trgm 或 ES，由 rag.keyword.store 选择；未启用时为 null） */
+    private final KeywordIndex keywordSearcher;
     /** Rerank 精排（组件始终在，模型默认休眠，见 {@link RerankScorer}） */
     private final RerankScorer rerankScorer;
 
@@ -105,7 +105,7 @@ public class RagService {
                       int chunkSize, int chunkOverlap,
                       RagSearchProperties searchProperties,
                       DocumentTextExtractor textExtractor,
-                      KeywordSearcher keywordSearcher,
+                      KeywordIndex keywordSearcher,
                       RerankScorer rerankScorer) {
         this.embeddingStore = embeddingStore;
         this.storeFile = storeFile;
@@ -197,6 +197,9 @@ public class RagService {
             return;
         }
         embeddingStore.removeAll(MetadataFilterBuilder.metadataKey(META_DOC_ID).isEqualTo(docId));
+        if (keywordSearcher != null) {
+            keywordSearcher.removeByDocId(docId);
+        }
         log.info("[RAG] 文档 {} 的向量片段已删除", docId);
         scheduleSnapshot();
     }
@@ -262,6 +265,42 @@ public class RagService {
         }
         log.info("[RAG] 独立检索：用户 {} 查询「{}」topK={} 命中 {} 条", userId, query, props.maxResults(), hits.size());
         return hits;
+    }
+
+    /**
+     * 关键词检索探针（P1-E 对比实验用）：只跑「关键词这一路」，返回命中与耗时，
+     * 不经过向量/融合/精排，便于在 pg_trgm 与 ES 之间做同口径的召回与延迟对比。
+     */
+    public KeywordProbeResult keywordProbe(String userId, String query, int topK) {
+        KeywordIndex index = keywordSearcher;
+        if (index == null) {
+            return new KeywordProbeResult("none", false, 0L, List.of());
+        }
+        long start = System.nanoTime();
+        List<KeywordIndex.KeywordHit> hits = index.available()
+                ? index.search(userId, query, clampTopK(topK)) : List.of();
+        long elapsed = (System.nanoTime() - start) / 1_000_000L;
+        List<KeywordProbeHit> mapped = new ArrayList<>(hits.size());
+        for (KeywordIndex.KeywordHit hit : hits) {
+            Metadata md = hit.segment() == null ? null : hit.segment().metadata();
+            mapped.add(new KeywordProbeHit(
+                    hit.embeddingId(),
+                    str(md, META_DOC_ID),
+                    str(md, META_SOURCE),
+                    str(md, META_TYPE),
+                    hit.segment() == null ? "" : hit.segment().text()));
+        }
+        return new KeywordProbeResult(index.name(), index.available(), elapsed, mapped);
+    }
+
+    /** 关键词探针结果（index=pg_trgm|es|none） */
+    public record KeywordProbeResult(String index, boolean available, long latencyMs,
+                                     List<KeywordProbeHit> hits) {
+    }
+
+    /** 关键词探针单条命中 */
+    public record KeywordProbeHit(String embeddingId, String docId, String source,
+                                  String type, String text) {
     }
 
     /** topK 归一：非正数取默认值，超过上限夹到上限（包级可见便于单测）。 */
@@ -361,7 +400,10 @@ public class RagService {
         return model;
     }
 
-    /** 批量向量化并写入向量库 */
+    /**
+     * 向量化并入库；同时（可选）写入关键词索引，两边共用同一批稳定 id，
+     * 使 RRF 融合能按 id 精确去重（P1-E）。
+     */
     private void embedAndStore(EmbeddingModel model, List<TextSegment> segments) {
         if (segments.isEmpty()) {
             return;
@@ -369,11 +411,31 @@ public class RagService {
         try {
             Response<List<Embedding>> response = model.embedAll(segments);
             List<Embedding> embeddings = response.content();
-            embeddingStore.addAll(embeddings, segments);
+            List<String> ids = new ArrayList<>(segments.size());
+            for (TextSegment segment : segments) {
+                ids.add(stableId(segment));
+            }
+            embeddingStore.addAll(ids, embeddings, segments);
+            if (keywordSearcher != null && keywordSearcher.available()) {
+                keywordSearcher.indexAll(ids, segments);
+            }
         } catch (Exception e) {
             log.warn("[RAG] 向量化/入库失败: {}", e.getMessage());
             throw e;
         }
+    }
+
+    /**
+     * 片段稳定 id：同一用户 + 同一片段内容 → 恒定 UUID。
+     * 用途：向量库与关键词索引共用 id；重复索引（MQ 至少一次语义）不会产生重复片段。
+     */
+    static String stableId(TextSegment segment) {
+        Metadata md = segment == null ? null : segment.metadata();
+        String key = str(md, META_USER_ID) + "|" + str(md, META_TYPE) + "|"
+                + str(md, META_DOC_ID) + "|" + str(md, META_CHUNK_INDEX) + "|"
+                + (segment == null ? "" : segment.text());
+        return java.util.UUID.nameUUIDFromBytes(
+                key.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
     }
 
     // ==================== 向量快照持久化 ====================
