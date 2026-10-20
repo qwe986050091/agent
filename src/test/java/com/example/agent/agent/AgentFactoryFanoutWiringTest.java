@@ -44,7 +44,7 @@ class AgentFactoryFanoutWiringTest {
                 skillManager, ragProvider,
                 mock(InjectionRuleScanner.class), mock(SafetyProperties.class),
                 router, executor,
-                fanoutEnabled, 4, 15);
+                fanoutEnabled, mock(AgentPlanner.class), 4, 4, 15);
     }
 
     private static AgentFactory.AgentChatRequest request() {

@@ -1,6 +1,9 @@
 package com.example.agent.agent;
 
+import com.example.agent.observability.AgentScope;
 import com.example.agent.observability.ObservabilityRetriever;
+import com.example.agent.observability.TraceCollector;
+import com.example.agent.observability.TraceContextHolder;
 import com.example.agent.rag.NumberedCitationContentInjector;
 import com.example.agent.rag.RagService;
 import com.example.agent.rag.TextFirstRetrievalAugmentor;
@@ -12,8 +15,10 @@ import com.example.agent.tools.ToolRegistry;
 import dev.langchain4j.data.message.Content;
 import dev.langchain4j.data.message.TextContent;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.output.TokenUsage;
 import dev.langchain4j.rag.RetrievalAugmentor;
 import dev.langchain4j.service.AiServices;
+import dev.langchain4j.service.Result;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -169,8 +174,28 @@ public class SubAgentFactory {
 
     private String run(SubAgent agent, String task) {
         List<Content> contents = List.of(TextContent.from(task));
-        String answer = agent.chat(contents);
-        return answer == null ? "" : answer;
+        Result<String> result = agent.chat(contents);
+        recordUsage(result.tokenUsage());
+        return result.content() == null ? "" : result.content();
+    }
+
+    /**
+     * 子代理用量：计入整轮 token 总量（真实成本），并累加到当前委派作用域
+     * （委派事件据此展示「这次子任务花了多少 token」）。
+     */
+    private static void recordUsage(TokenUsage usage) {
+        if (usage == null) {
+            return;
+        }
+        int input = usage.inputTokenCount() == null ? 0 : usage.inputTokenCount();
+        int output = usage.outputTokenCount() == null ? 0 : usage.outputTokenCount();
+        int total = usage.totalTokenCount() == null ? 0 : usage.totalTokenCount();
+        int sum = total > 0 ? total : input + output;
+        TraceCollector collector = TraceContextHolder.current();
+        if (collector != null) {
+            collector.recordDelegatedUsage(input, output, total);
+        }
+        AgentScope.addTokens(sum);
     }
 
     private static String safe(String s) {

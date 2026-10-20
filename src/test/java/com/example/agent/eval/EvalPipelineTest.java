@@ -157,7 +157,7 @@ class EvalPipelineTest {
         static EvalTurn ragTurn(String id, String answer, String docId) {
             var seg = new com.example.agent.observability.model.RagSegment(
                     docId, docId + ".txt", "document", "片段", 0.9, "vector", null);
-            var rag = new com.example.agent.observability.model.RagTraceEvent("q", List.of(seg));
+            var rag = new com.example.agent.observability.model.RagTraceEvent("q", List.of(seg), null);
             return new EvalTurn(id, answer, null, List.of(), List.of(rag), List.of(),
                     usage(), false, null, 1);
         }

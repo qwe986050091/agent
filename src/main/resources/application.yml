@@ -52,6 +52,10 @@ agent:
     enabled: true                    # 开启：Supervisor 模式挂上 delegate_parallel 工具
     max-parallel: 3                  # 并发执行的子代理上限（有界线程池大小）
     per-task-timeout-seconds: 120    # 单个子任务超时（必须大于 agent.approval.timeout-seconds：子代理可能等人工确认）
+  # ===== Planner（任务分解）：把有依赖的多步任务拆成有序步骤并串行执行 =====
+  planner:
+    enabled: true                    # 开启且挂载 ≥2 个子代理时挂上 delegate_plan 工具（模型按需调用）
+    max-steps: 4                     # 单个计划最多步骤数（同时计入回合委派预算）
   # ===== 高危工具人工确认（human-in-the-loop） =====
   approval:
     # 前端审批弹窗等待时长（秒）；超时高危操作自动拒绝。必须小于 SSE 总超时 5 分钟

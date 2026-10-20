@@ -1,6 +1,7 @@
 package com.example.agent.agent;
 
 import dev.langchain4j.data.message.Content;
+import dev.langchain4j.service.Result;
 import dev.langchain4j.service.UserMessage;
 
 import java.util.List;
@@ -14,9 +15,12 @@ import java.util.List;
  *   - 它有自己的 System Message 与私有工具集，内部跑自己的多轮 ReAct 循环，
  *     对主 Agent 而言它只是一个普通工具。
  *
+ * 返回值用 {@link Result} 而非 String：委派事件需要统计子代理的 token 用量
+ * （计入整轮成本 + 挂到父子 Agent 调用树上）。
+ *
  * 入参与 {@link SimpleAgent} 一致：{@code @UserMessage List<Content>}（纯文本时为单个 TextContent）。
  */
 public interface SubAgent {
 
-    String chat(@UserMessage List<Content> contents);
+    Result<String> chat(@UserMessage List<Content> contents);
 }

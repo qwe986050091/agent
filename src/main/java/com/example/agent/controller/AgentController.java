@@ -221,13 +221,13 @@ public class AgentController {
         }
     }
 
-    /** 构造同步对话响应（含 traceId/usage/tools/retrievals/safeties） */
+    /** 构造同步对话响应（含 traceId/usage/tools/retrievals/safeties/delegations） */
     private ChatResponse buildResponse(AgentFactory.AgentChatRequest req, TraceCollector collector,
                                        String answer, String summary) {
         UsageTraceEvent usage = collector.toUsageEvent(false);
         return new ChatResponse(req.userId(), req.message(), answer, summary,
                 collector.traceId(), usage, collector.tools(), collector.retrievals(),
-                collector.safeties());
+                collector.safeties(), collector.delegationEvents());
     }
 
     private static long elapsedMs(long startNanos) {
@@ -593,7 +593,7 @@ public class AgentController {
         }
     }
 
-    /** 发送一个命名 trace 事件（tool/rag/usage）；客户端已取消/断连则静默跳过 */
+    /** 发送一个命名 trace 事件（tool/rag/usage/delegation）；客户端已取消/断连则静默跳过 */
     void emitTraceEvent(SseEmitter emitter, AtomicBoolean cancelled, TraceEvent event) {
         if (cancelled.get()) {
             return;
@@ -605,6 +605,7 @@ public class AgentController {
                 case UsageTraceEvent ignored -> "usage";
                 case com.example.agent.observability.model.TraceResetEvent ignored -> "trace-reset";
                 case SafetyTraceEvent ignored -> "safety";
+                case com.example.agent.observability.model.DelegationTraceEvent ignored -> "delegation";
             };
             String json = objectMapper.writeValueAsString(event);
             // SseEmitter 非线程安全：fan-out 并发子代理的 trace 事件来自多个工作线程，必须串行化
@@ -1019,6 +1020,8 @@ public class AgentController {
         private List<com.example.agent.observability.model.RagTraceEvent> retrievals;
         /** 本轮内容安全检测记录（P4-17；无命中为空列表） */
         private List<SafetyTraceEvent> safeties;
+        /** 本轮子代理委派记录（父子 Agent 调用树；无委派为空列表） */
+        private java.util.List<com.example.agent.observability.model.DelegationTraceEvent> delegations;
 
         public ChatResponse() {}
 
@@ -1026,7 +1029,8 @@ public class AgentController {
                             String traceId, UsageTraceEvent usage,
                             List<ToolTraceEvent> tools,
                             List<com.example.agent.observability.model.RagTraceEvent> retrievals,
-                            List<SafetyTraceEvent> safeties) {
+                            List<SafetyTraceEvent> safeties,
+                            java.util.List<com.example.agent.observability.model.DelegationTraceEvent> delegations) {
             this.userId = userId;
             this.question = question;
             this.answer = answer;
@@ -1036,6 +1040,7 @@ public class AgentController {
             this.tools = tools;
             this.retrievals = retrievals;
             this.safeties = safeties;
+            this.delegations = delegations;
         }
 
         public String getUserId() { return userId; }
@@ -1058,6 +1063,13 @@ public class AgentController {
         }
         public List<SafetyTraceEvent> getSafeties() { return safeties; }
         public void setSafeties(List<SafetyTraceEvent> safeties) { this.safeties = safeties; }
+        public java.util.List<com.example.agent.observability.model.DelegationTraceEvent> getDelegations() {
+            return delegations;
+        }
+        public void setDelegations(
+                java.util.List<com.example.agent.observability.model.DelegationTraceEvent> delegations) {
+            this.delegations = delegations;
+        }
     }
 
     public static class ErrorResponse {

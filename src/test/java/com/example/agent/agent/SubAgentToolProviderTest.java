@@ -59,14 +59,30 @@ class SubAgentToolProviderTest {
     void executorRunsSubAgentAndReturnsItsAnswer() {
         SubAgentToolProvider provider = new SubAgentToolProvider(
                 "researcher", "研究子代理",
-                (task, memoryId) -> "结论:" + task, 4, 4000);
+                (task, memoryId) -> {
+                    // 模拟子代理内部 LLM 用量：应累计到本次委派事件
+                    AgentScope.addTokens(42);
+                    return "结论:" + task;
+                }, 4, 4000);
         ToolProviderResult result = provider.provideTools(request());
         ToolExecutor executor = result.toolExecutorByName("delegate_researcher");
 
-        String answer = executor.execute(
-                call("delegate_researcher", "{\"task\":\"分析一下\"}"), 0L);
+        TraceCollector collector = TraceContextHolder.start("t-1", "u-1", 0L, null, null);
+        try {
+            String answer = executor.execute(
+                    call("delegate_researcher", "{\"task\":\"分析一下\"}"), 0L);
 
-        assertThat(answer).isEqualTo("结论:分析一下");
+            assertThat(answer).isEqualTo("结论:分析一下");
+            assertThat(collector.delegationEvents()).hasSize(1);
+            var event = collector.delegationEvents().get(0);
+            assertThat(event.agent()).isEqualTo("researcher");
+            assertThat(event.parentId()).isNull();
+            assertThat(event.success()).isTrue();
+            assertThat(event.tokens()).isEqualTo(42);
+            assertThat(event.task()).contains("分析一下");
+        } finally {
+            TraceContextHolder.clear();
+        }
     }
 
     @Test

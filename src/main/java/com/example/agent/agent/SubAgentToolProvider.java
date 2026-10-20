@@ -1,8 +1,10 @@
 package com.example.agent.agent;
 
 import com.example.agent.observability.AgentScope;
+import com.example.agent.observability.DelegationIds;
 import com.example.agent.observability.TraceCollector;
 import com.example.agent.observability.TraceContextHolder;
+import com.example.agent.observability.model.DelegationTraceEvent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
@@ -116,14 +118,47 @@ public class SubAgentToolProvider implements ToolProvider {
         if (collector != null) {
             collector.recordDelegation();
         }
+        String delegationId = DelegationIds.next();
+        String parentId = AgentScope.currentDelegationId();
+        String clampedTask = clamp(task);
+        long start = System.nanoTime();
         try {
-            // 进入子代理作用域：其内部执行的所有工具调用会被 trace 标注为归属于本子代理
-            String result = AgentScope.runScoped(skillName, () -> runner.run(clamp(task), memoryId));
-            return result == null || result.isBlank() ? "子代理未返回有效内容。" : result;
+            // 进入子代理作用域：其内部工具/RAG 会被标注归属本子代理，并累计本次委派的 token
+            AgentScope.Scoped<String> scoped = AgentScope.runScopedDetailed(
+                    skillName, delegationId, () -> runner.run(clampedTask, memoryId));
+            String result = scoped.value();
+            String text = result == null || result.isBlank() ? "子代理未返回有效内容。" : result;
+            record(collector, delegationId, parentId, task, true, null,
+                    scoped.durationMs(), scoped.tokens());
+            return text;
         } catch (Exception e) {
             log.warn("[SubAgent] 「{}」执行失败: {}", skillName, e.getMessage());
+            record(collector, delegationId, parentId, task, false, e.getMessage(),
+                    elapsedMs(start), 0);
             return "子代理「" + skillName + "」执行失败：" + e.getMessage();
         }
+    }
+
+    /** 写一条委派事件（父子 Agent 调用树节点）；collector 为空（如无 trace 上下文）时跳过 */
+    private void record(TraceCollector collector, String delegationId, String parentId,
+                        String task, boolean success, String error, long durationMs, int tokens) {
+        if (collector == null) {
+            return;
+        }
+        collector.recordDelegationEvent(new DelegationTraceEvent(
+                delegationId, skillName, parentId, truncate(task, 300),
+                success, error, durationMs, tokens));
+    }
+
+    private static long elapsedMs(long startNanos) {
+        return Math.max(0L, (System.nanoTime() - startNanos) / 1_000_000L);
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) {
+            return null;
+        }
+        return s.length() <= max ? s : s.substring(0, max) + "...";
     }
 
     /** 从工具参数 JSON 取 task 文本；参数非对象/解析失败/字段缺失均返回 null（由调用方给出可读提示） */

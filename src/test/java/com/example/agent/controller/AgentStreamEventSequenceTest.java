@@ -192,7 +192,7 @@ class AgentStreamEventSequenceTest {
     void traceEventNamesAreMappedPerType() {
         assertThat(eventNameOf(new ToolTraceEvent(1, "call-1", "getCurrentTime", "{}", "12:00", true, null, 8, null)))
                 .isEqualTo("tool");
-        assertThat(eventNameOf(new RagTraceEvent("报销流程", List.of()))).isEqualTo("rag");
+        assertThat(eventNameOf(new RagTraceEvent("报销流程", List.of(), null))).isEqualTo("rag");
         assertThat(eventNameOf(new UsageTraceEvent("deepseek-v4-flash", 10, 20, 30, 1, false, false, 120)))
                 .isEqualTo("usage");
         assertThat(eventNameOf(new TraceResetEvent())).isEqualTo("trace-reset");

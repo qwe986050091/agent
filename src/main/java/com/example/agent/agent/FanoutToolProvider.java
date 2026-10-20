@@ -1,9 +1,11 @@
 package com.example.agent.agent;
 
 import com.example.agent.observability.AgentScope;
+import com.example.agent.observability.DelegationIds;
 import com.example.agent.observability.RequestContext;
 import com.example.agent.observability.TraceCollector;
 import com.example.agent.observability.TraceContextHolder;
+import com.example.agent.observability.model.DelegationTraceEvent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
@@ -117,12 +119,48 @@ public class FanoutToolProvider implements ToolProvider {
         }
 
         RequestContext ctx = RequestContext.capture();
+        String parentId = AgentScope.currentDelegationId();
         List<FanoutExecutor.FanoutOutcome> outcomes = executor.run(ctx, tasks, task -> {
-            // 进入该子代理作用域：其内部工具调用会被 trace 标注为归属该子代理（与单个委派一致）
+            // 每个扇出任务都是调用树上的一个委派节点（同层兄弟节点）
             SubAgentToolProvider.SubAgentRunner runner = runners.get(task.agent());
-            return AgentScope.runScoped(task.agent(), () -> runner.run(task.task(), memoryId));
+            String delegationId = DelegationIds.next();
+            long start = System.nanoTime();
+            try {
+                AgentScope.Scoped<String> scoped = AgentScope.runScopedDetailed(
+                        task.agent(), delegationId, () -> runner.run(task.task(), memoryId));
+                record(collector, delegationId, parentId, task, true, null,
+                        scoped.durationMs(), scoped.tokens());
+                return scoped.value();
+            } catch (RuntimeException e) {
+                record(collector, delegationId, parentId, task, false, e.getMessage(),
+                        elapsedMs(start), 0);
+                throw e;
+            }
         });
         return merge(outcomes);
+    }
+
+    /** 写一条委派事件（collector 为空时跳过） */
+    private static void record(TraceCollector collector, String delegationId, String parentId,
+                               FanoutExecutor.FanoutTask task, boolean success, String error,
+                               long durationMs, int tokens) {
+        if (collector == null) {
+            return;
+        }
+        collector.recordDelegationEvent(new DelegationTraceEvent(
+                delegationId, task.agent(), parentId, truncate(task.task(), 300),
+                success, error, durationMs, tokens));
+    }
+
+    private static long elapsedMs(long startNanos) {
+        return Math.max(0L, (System.nanoTime() - startNanos) / 1_000_000L);
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) {
+            return null;
+        }
+        return s.length() <= max ? s : s.substring(0, max) + "...";
     }
 
     /** 合并各子代理结果：成功输出正文，失败/超时显式标注（不掩盖，供主 Agent 如实汇总） */

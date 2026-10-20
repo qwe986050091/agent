@@ -1,5 +1,6 @@
 package com.example.agent.observability;
 
+import com.example.agent.observability.model.DelegationTraceEvent;
 import com.example.agent.observability.model.RagSegment;
 import com.example.agent.observability.model.RagTraceEvent;
 import com.example.agent.observability.model.SafetyTraceEvent;
@@ -66,6 +67,8 @@ public class TraceCollector {
     private final List<RagTraceEvent> retrievals = new ArrayList<>();
     /** 内容安全检测记录（P4-17）：一回合可多条（input/rag/tool_output/output 各通道） */
     private final List<SafetyTraceEvent> safeties = new ArrayList<>();
+    /** 子代理委派事件（父子 Agent 调用树；一次委派一条） */
+    private final List<DelegationTraceEvent> delegationEvents = new ArrayList<>();
     /** key = 工具调用 id（id 缺失时用合成序号），等待配对的工具请求（按发生顺序） */
     private final Map<String, PendingTool> pendingTools = new LinkedHashMap();
     /** 已完成配对的工具调用 id（多轮请求会重复携带历史结果，用于去重） */
@@ -123,6 +126,7 @@ public class TraceCollector {
         this.tools.clear();
         this.retrievals.clear();
         this.safeties.clear();
+        this.delegationEvents.clear();
         emit(new TraceResetEvent());
     }
 
@@ -212,7 +216,7 @@ public class TraceCollector {
     /** 记录一次 RAG 检索（query + 召回片段），无命中时 segments 为空 */
     public synchronized void recordRag(String query, List<RagSegment> segments) {
         List<RagSegment> copy = List.copyOf(segments);
-        RagTraceEvent event = new RagTraceEvent(truncate(query, MAX_QUERY), copy);
+        RagTraceEvent event = new RagTraceEvent(truncate(query, MAX_QUERY), copy, AgentScope.current());
         retrievals.add(event);
         emit(event);
         try {
@@ -250,6 +254,9 @@ public class TraceCollector {
     }
 
     public synchronized boolean usagePresent() { return usagePresent; }
+
+    /** 整轮 token 总量快照（计划编排用它计算「本次规划消耗」的增量） */
+    public synchronized int totalTokens() { return totalTokens; }
     public synchronized int llmErrors() { return llmErrors; }
 
     /** 本回合已发生的子代理委派次数（Agent-as-Tool 全局预算：与单循环轮次上限共同约束总成本） */
@@ -258,9 +265,36 @@ public class TraceCollector {
     /** 记录一次子代理委派（由 SubAgentToolProvider / FanoutToolProvider 在委派前调用） */
     public synchronized void recordDelegation() { delegations++; }
 
+    /** 记录一次子代理委派的结果节点（父子 Agent 调用树 + 实时 SSE） */
+    public synchronized void recordDelegationEvent(DelegationTraceEvent event) {
+        if (event == null) {
+            return;
+        }
+        delegationEvents.add(event);
+        emit(event);
+    }
+
+    /**
+     * 累加子代理 LLM 用量：计入整轮 token 总量（真实花费）并标记 usage 存在。
+     * 轮次（rounds）仍只统计主 Agent 的 LLM 调用，避免语义漂移。
+     */
+    public synchronized void recordDelegatedUsage(Integer input, Integer output, Integer total) {
+        int in = nz(input);
+        int out = nz(output);
+        int sum = nz(total) > 0 ? nz(total) : in + out;
+        if (in == 0 && out == 0 && sum == 0) {
+            return;
+        }
+        usagePresent = true;
+        inputTokens += in;
+        outputTokens += out;
+        totalTokens += sum;
+    }
+
     public synchronized List<ToolTraceEvent> tools() { return List.copyOf(tools); }
     public synchronized List<RagTraceEvent> retrievals() { return List.copyOf(retrievals); }
     public synchronized List<SafetyTraceEvent> safeties() { return List.copyOf(safeties); }
+    public synchronized List<DelegationTraceEvent> delegationEvents() { return List.copyOf(delegationEvents); }
 
     private void emit(TraceEvent event) {
         if (sink == null) {

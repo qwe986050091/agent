@@ -96,6 +96,10 @@ public class AgentFactory {
     private final FanoutExecutor fanoutExecutor;
     /** fan-out 是否启用（agent.fanout.enabled；不启用时正交，不影响现有行为） */
     private final boolean fanoutEnabled;
+    /** 任务规划器（Planner：多步任务分解 + 校验回环） */
+    private final AgentPlanner planner;
+    /** 单个计划允许的最大步骤数 */
+    private final int plannerMaxSteps;
     /** 回合级委派预算上限（与 SubAgentFactory 共用同一配置项；fan-out 按任务数计入） */
     private final int maxDelegationsPerTurn;
 
@@ -118,6 +122,8 @@ public class AgentFactory {
                         IntentRouter intentRouter,
                         FanoutExecutor fanoutExecutor,
                         @Value("${agent.fanout.enabled:false}") boolean fanoutEnabled,
+                        AgentPlanner planner,
+                        @Value("${agent.planner.max-steps:4}") int plannerMaxSteps,
                         @Value("${agent.subagent.max-delegations-per-turn:4}") int maxDelegationsPerTurn,
                         @Value("${agent.loop.max-tool-round-trips:15}") int maxToolRoundTrips) {
         this.chatModel = chatModel;
@@ -131,6 +137,8 @@ public class AgentFactory {
         this.intentRouter = intentRouter;
         this.fanoutExecutor = fanoutExecutor;
         this.fanoutEnabled = fanoutEnabled;
+        this.planner = planner;
+        this.plannerMaxSteps = plannerMaxSteps;
         this.maxDelegationsPerTurn = maxDelegationsPerTurn;
         this.maxToolRoundTrips = maxToolRoundTrips;
     }
@@ -387,6 +395,10 @@ public class AgentFactory {
         if (fanout != null) {
             providers.add(fanout);
         }
+        ToolProvider plan = plannerProvider(specialists);
+        if (plan != null) {
+            providers.add(plan);
+        }
         return new TurnPlan(buildSystemMessage(supervisorPersona(mountedSkills)),
                 toolsOf(mountedSkills), providers);
     }
@@ -431,6 +443,23 @@ public class AgentFactory {
     }
 
     /**
+     * 计划编排工具：Planner 开启且挂载了 ≥2 个子代理时挂上 delegate_plan。
+     * 只有一个专家时没必要规划（直接委派更快）；没有专家时也无从分解。
+     */
+    private ToolProvider plannerProvider(List<SubAgentSkill> specialists) {
+        if (planner == null || !planner.isEnabled() || specialists.size() < 2) {
+            return null;
+        }
+        Map<String, SubAgentToolProvider.SubAgentRunner> runners = new LinkedHashMap<>();
+        Map<String, String> labels = new LinkedHashMap<>();
+        for (SubAgentSkill s : specialists) {
+            runners.put(s.name(), s.runner());
+            labels.put(s.name(), s.shortDescription() == null ? "" : s.shortDescription());
+        }
+        return new PlannerToolProvider(planner::plan, runners, labels, maxDelegationsPerTurn, plannerMaxSteps);
+    }
+
+    /**
      * Supervisor（主 Agent）人设：默认人设 + 每个已挂载技能的委派/使用指引。
      */
     private String supervisorPersona(List<Skill> mountedSkills) {
@@ -443,6 +472,16 @@ public class AgentFactory {
                     sb.append(skill.systemPrompt()).append("\n");
                 }
             }
+        }
+        if (planner != null && planner.isEnabled() && specialistsOf(mountedSkills).size() >= 2) {
+            sb.append("""
+
+                    【多步任务编排】
+                    当任务需要多个步骤且有先后依赖（例如：先检索资料 → 再执行处理 → 最后校验结论），
+                    优先调用 delegate_plan，把完整目标作为 goal 传入；它会自动分解并串行执行，
+                    最后把各步骤结果交回给你汇总。互不依赖的子任务用 delegate_parallel；
+                    一步就能完成的问题直接作答，不要为了规划而规划。
+                    """);
         }
         return sb.toString();
     }

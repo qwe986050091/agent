@@ -193,7 +193,7 @@ class EvalScorerTest {
         for (String docId : docIds) {
             segs.add(new RagSegment(docId, docId + ".txt", "document", "片段", 0.9, "vector", null));
         }
-        return List.of(new RagTraceEvent("query", segs));
+        return List.of(new RagTraceEvent("query", segs, null));
     }
 
     private static UsageTraceEvent usage() {
