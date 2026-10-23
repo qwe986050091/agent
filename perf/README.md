@@ -3,7 +3,7 @@
 面向 agent 服务的可复现压测工具：隔离上游 LLM 波动，只测 agent JVM 的
 线程池、SSE 编解码、内存分配与 GC 行为，同时用于 G1 / ZGC 对比。
 
-完整报告：[`d:\code\agent_frontend\.trae\documents\p2-g-jvm-loadtest-report-2026-10-23.html`](../../agent_frontend/.trae/documents/p2-g-jvm-loadtest-report-2026-10-23.html)
+完整报告：[`d:\code\agent_frontend\.trae\documents\reports\p2-g-jvm-loadtest-report-2026-10-23.html`](../../agent_frontend/.trae/documents/reports/p2-g-jvm-loadtest-report-2026-10-23.html)
 
 ## 文件
 
