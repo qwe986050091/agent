@@ -4,6 +4,7 @@ import com.example.agent.rag.DocumentTextExtractor;
 import com.example.agent.rag.RagService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -29,6 +30,7 @@ import java.util.List;
  */
 @RestController
 @RequestMapping("/api/agent/rag")
+@ConditionalOnProperty(prefix = "rag", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class RagController {
 
     private static final Logger log = LoggerFactory.getLogger(RagController.class);

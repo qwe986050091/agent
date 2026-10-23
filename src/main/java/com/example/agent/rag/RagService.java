@@ -18,6 +18,7 @@ import dev.langchain4j.store.embedding.inmemory.InMemoryEmbeddingStore;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -44,6 +45,7 @@ import java.util.concurrent.Executors;
  *  - 优雅降级：模型加载或向量化失败时 RAG 自动关闭，不影响正常聊天
  */
 @Service
+@ConditionalOnProperty(prefix = "rag", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class RagService {
 
     private static final Logger log = LoggerFactory.getLogger(RagService.class);
