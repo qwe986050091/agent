@@ -1,5 +1,7 @@
 package com.example.agent.agent;
 
+import com.example.agent.context.ContextBudget;
+import com.example.agent.context.ContextProperties;
 import com.example.agent.observability.ObservabilityRetriever;
 import com.example.agent.observability.TraceAwareStreamingChatModel;
 import com.example.agent.observability.TraceCollector;
@@ -90,6 +92,8 @@ public class AgentFactory {
     private final InjectionRuleScanner injectionRuleScanner;
     /** 内容安全配置（agent.safety.*） */
     private final SafetyProperties safetyProperties;
+    /** 上下文预算配置（agent.context.*，P1-D） */
+    private final ContextProperties contextProperties;
     /** 意图路由：把本轮交给命中的单个专家（默认关闭） */
     private final IntentRouter intentRouter;
     /** fan-out 并行执行器 */
@@ -119,6 +123,7 @@ public class AgentFactory {
                         ObjectProvider<RagService> ragServiceProvider,
                         InjectionRuleScanner injectionRuleScanner,
                         SafetyProperties safetyProperties,
+                        ContextProperties contextProperties,
                         IntentRouter intentRouter,
                         FanoutExecutor fanoutExecutor,
                         @Value("${agent.fanout.enabled:false}") boolean fanoutEnabled,
@@ -134,6 +139,7 @@ public class AgentFactory {
         this.ragServiceProvider = ragServiceProvider;
         this.injectionRuleScanner = injectionRuleScanner;
         this.safetyProperties = safetyProperties;
+        this.contextProperties = contextProperties;
         this.intentRouter = intentRouter;
         this.fanoutExecutor = fanoutExecutor;
         this.fanoutEnabled = fanoutEnabled;
@@ -185,9 +191,8 @@ public class AgentFactory {
     public AgentChatResult chat(AgentChatRequest request) {
         List<Skill> mountedSkills = prepare(request);
 
-        SummarizingChatMemory memory = restoreMemory(request);
         try {
-            return doChat(request, mountedSkills, memory, chatModel);
+            return doChat(request, mountedSkills, chatModel);
         } catch (Exception e) {
             if (isToolLoopExceeded(e)) {
                 throw e;
@@ -198,13 +203,16 @@ public class AgentFactory {
             if (collector != null) {
                 collector.prepareForFallback();
             }
-            return doChat(request, mountedSkills, memory, fallbackChatModel);
+            return doChat(request, mountedSkills, fallbackChatModel);
         }
     }
 
-    private AgentChatResult doChat(AgentChatRequest request, List<Skill> mountedSkills,
-                                   SummarizingChatMemory memory, ChatModel model) {
+    private AgentChatResult doChat(AgentChatRequest request, List<Skill> mountedSkills, ChatModel model) {
         TurnPlan plan = planTurn(request, mountedSkills);
+        // 请求级上下文预算（P1-D）：系统段 → 记忆裁剪 → 检索裁剪，回合末写入 trace
+        ContextBudget budget = newContextBudget(TraceContextHolder.current());
+        budget.recordSystem(plan.systemMessage());
+        SummarizingChatMemory memory = restoreMemory(request, budget);
         AiServices<SimpleAgent> builder = AiServices.builder(SimpleAgent.class)
                 .chatModel(model)
                 .maxToolCallingRoundTrips(maxToolRoundTrips)
@@ -213,7 +221,8 @@ public class AgentFactory {
                 .chatMemoryProvider(memoryId -> memory)
                 .retrievalAugmentor(new TextFirstRetrievalAugmentor(
                         retrieverFor(request.userId()),
-                        new NumberedCitationContentInjector(injectionRuleScanner)));
+                        new NumberedCitationContentInjector(injectionRuleScanner),
+                        budget));
         if (!plan.toolProviders().isEmpty()) {
             builder.toolProviders(plan.toolProviders().toArray(new ToolProvider[0]));
         }
@@ -223,6 +232,7 @@ public class AgentFactory {
         dev.langchain4j.data.message.UserMessage currentMessage =
                 MultimodalUserMessages.from(request.message(), request.images());
         String answer = agent.chat(request.memoryId(), currentMessage.contents());
+        budget.finish();
         return new AgentChatResult(answer == null ? "" : answer, memory.summaryText());
     }
 
@@ -261,13 +271,16 @@ public class AgentFactory {
                                   TraceCollector collector) {
         List<Skill> mountedSkills = prepare(request);
 
-        SummarizingChatMemory memory = restoreMemory(request);
         // 流式回调在 HTTP 客户端线程执行，ThreadLocal 上下文不可见：
         // 用请求级装饰器显式绑定 collector 与审批闸门（由 worker 线程的调用方传入）
         StreamingChatModel effectiveModel = collector == null && gate == null
                 ? model
                 : new TraceAwareStreamingChatModel(model, collector, gate);
         TurnPlan plan = planTurn(request, mountedSkills);
+        // 请求级上下文预算（P1-D）：系统段 → 记忆裁剪 → 检索裁剪，回合末写入 trace
+        ContextBudget budget = newContextBudget(collector);
+        budget.recordSystem(plan.systemMessage());
+        SummarizingChatMemory memory = restoreMemory(request, budget);
         AiServices<StreamingSimpleAgent> builder = AiServices.builder(StreamingSimpleAgent.class)
                 .streamingChatModel(effectiveModel)
                 .maxToolCallingRoundTrips(maxToolRoundTrips)
@@ -276,7 +289,8 @@ public class AgentFactory {
                 .chatMemoryProvider(memoryId -> memory)
                 .retrievalAugmentor(new TextFirstRetrievalAugmentor(
                         retrieverFor(request.userId()),
-                        new NumberedCitationContentInjector(injectionRuleScanner)));
+                        new NumberedCitationContentInjector(injectionRuleScanner),
+                        budget));
         if (!plan.toolProviders().isEmpty()) {
             builder.toolProviders(plan.toolProviders().toArray(new ToolProvider[0]));
         }
@@ -290,6 +304,8 @@ public class AgentFactory {
                 .onCompleteResponse(response -> {
                     String text = response.aiMessage().text();
                     String answer = text == null ? "" : text;
+                    // 先落上下文快照，再由控制器在 usage 之前下发 event: context
+                    budget.finish();
                     onComplete.accept(answer, memory.summaryText());
                 })
                 .onError(onError);
@@ -328,12 +344,22 @@ public class AgentFactory {
         return mountedSkills;
     }
 
-    /** 按 backend 下发的摘要 + 历史重建请求级记忆（记忆键=用户+会话；用完即弃，不跨请求保留） */
-    private SummarizingChatMemory restoreMemory(AgentChatRequest request) {
+    /**
+     * 按 backend 下发的摘要 + 历史重建请求级记忆（记忆键=用户+会话；用完即弃，不跨请求保留）。
+     * 重建前先按上下文预算裁剪摘要与历史（P1-D）。
+     */
+    private SummarizingChatMemory restoreMemory(AgentChatRequest request, ContextBudget budget) {
+        ContextBudget.MemoryPlan plan = budget.applyMemoryInputs(
+                request.summary(), request.history(), request.message(), request.images());
         return SummarizingChatMemory.restore(
                 request.memoryId(), chatModel,
                 MEMORY_MAX_MESSAGES, MEMORY_KEEP_RECENT,
-                request.summary(), request.history());
+                plan.summary(), plan.history());
+    }
+
+    /** 创建请求级上下文预算（collector 可为 null：无 trace 的装配单测/内部调用） */
+    private ContextBudget newContextBudget(TraceCollector collector) {
+        return new ContextBudget(contextProperties, collector);
     }
 
     /** 从 Skills 提取所有 Tools */

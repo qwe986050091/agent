@@ -5,6 +5,7 @@ import com.example.agent.approval.ApprovalRegistry;
 import com.example.agent.observability.AgentMetricsSink;
 import com.example.agent.observability.TraceCollector;
 import com.example.agent.observability.TraceContextHolder;
+import com.example.agent.observability.model.ContextTraceEvent;
 import com.example.agent.observability.model.RagTraceEvent;
 import com.example.agent.observability.model.SafetyTraceEvent;
 import com.example.agent.observability.model.ToolTraceEvent;
@@ -93,6 +94,26 @@ class AgentStreamEventSequenceTest {
         assertThat(flat).contains("summary").contains("本轮摘要");
         assertThat(emitter.completed).isTrue();
         assertThat(emitter.failed).isNull();
+        assertThat(outcomes).containsExactly("success");
+    }
+
+    @Test
+    void contextEventIsSentBeforeUsageWhenPresent() {
+        RecordingSseEmitter emitter = new RecordingSseEmitter();
+        List<String> outcomes = new ArrayList<>();
+        collector.recordContext(new ContextTraceEvent("balanced", 1000, 320, false, List.of(
+                new ContextTraceEvent.Segment("system", "系统提示（含安全边界）", 500, 100, false, "ok"),
+                new ContextTraceEvent.Segment("history", "历史对话（含本轮）", 400, 220, false, "ok"))));
+
+        controller.sendTurnCompletion(emitter, new AtomicBoolean(false), collector,
+                "完整回答文本", "本轮摘要", outcomes::add);
+
+        String flat = emitter.flat();
+        int context = flat.indexOf("event:context");
+        int usage = flat.indexOf("event:usage");
+        assertThat(context).as("context 事件应存在").isNotNegative();
+        assertThat(usage).isGreaterThan(context);
+        assertThat(flat).contains("\"strategy\":\"balanced\"").contains("system");
         assertThat(outcomes).containsExactly("success");
     }
 
@@ -198,6 +219,8 @@ class AgentStreamEventSequenceTest {
         assertThat(eventNameOf(new TraceResetEvent())).isEqualTo("trace-reset");
         assertThat(eventNameOf(new SafetyTraceEvent("input", 4, "none", "rule", "none", null, List.of(), "片段", 3)))
                 .isEqualTo("safety");
+        assertThat(eventNameOf(new ContextTraceEvent("balanced", 1000, 300, false, List.of())))
+                .isEqualTo("context");
     }
 
     @Test

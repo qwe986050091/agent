@@ -37,6 +37,20 @@ agent:
     # 单次对话中工具调用（含"模型→工具→模型"完整往返）的最大轮次；
     # 超限后强制收敛为一条提示（库默认 100 太高，易被死循环 prompt 烧 token）
     max-tool-round-trips: 15
+  # ===== 上下文工程（P1-D）：四段 token 预算 + 超限裁剪 =====
+  # 四段：system（人设+技能+安全边界）/ summary（历史摘要）/ retrieval（知识库片段）/
+  #       history（最近对话，含本轮用户消息）。system 与当前消息受保护，不裁剪。
+  # A/B：改 strategy 后重跑 eval（agent.context.* 可用环境变量/启动参数覆盖），
+  #      对比通过率与 avgTokens，即为「裁剪策略 A vs B」的量化验证。
+  context:
+    enabled: true                  # false = 不裁剪（仅观测，等同回滚）
+    strategy: balanced             # balanced（先裁历史，检索最保）| history-priority（先裁摘要，最近原文最保）
+    total-budget-tokens: 10000     # 四段合计输入预算（不含模型输出）
+    system-max-tokens: 2500        # system 段预算（受保护，超限只标记）
+    summary-max-tokens: 1200       # 摘要段预算（超出硬裁剪）
+    history-max-tokens: 4500       # 历史段预算（含本轮消息；超出从最旧消息丢弃）
+    retrieval-max-tokens: 2500     # 检索片段预算（含引用规则固定开销）
+    min-history-messages: 2        # 历史段至少保留的最近消息条数
   # ===== 子代理（Agent-as-Tool）：技能声明 type=agent 时，主 Agent 以委派工具方式调用 =====
   subagent:
     enabled: true                    # 关闭时 type=agent 的技能退化为普通技能（工具直挂主 Agent）

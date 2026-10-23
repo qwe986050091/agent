@@ -1,5 +1,6 @@
 package com.example.agent.agent;
 
+import com.example.agent.context.ContextProperties;
 import com.example.agent.rag.RagService;
 import com.example.agent.security.InjectionRuleScanner;
 import com.example.agent.security.SafetyProperties;
@@ -43,6 +44,7 @@ class AgentFactoryFanoutWiringTest {
                 mock(StreamingChatModel.class), mock(StreamingChatModel.class),
                 skillManager, ragProvider,
                 mock(InjectionRuleScanner.class), mock(SafetyProperties.class),
+                new ContextProperties(),
                 router, executor,
                 fanoutEnabled, mock(AgentPlanner.class), 4, 4, 15);
     }

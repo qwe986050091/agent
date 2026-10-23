@@ -1,5 +1,6 @@
 package com.example.agent.observability;
 
+import com.example.agent.observability.model.ContextTraceEvent;
 import com.example.agent.observability.model.DelegationTraceEvent;
 import com.example.agent.observability.model.RagSegment;
 import com.example.agent.observability.model.RagTraceEvent;
@@ -69,6 +70,8 @@ public class TraceCollector {
     private final List<SafetyTraceEvent> safeties = new ArrayList<>();
     /** 子代理委派事件（父子 Agent 调用树；一次委派一条） */
     private final List<DelegationTraceEvent> delegationEvents = new ArrayList<>();
+    /** 本轮上下文构成（P1-D；回合末随 usage 之前下发，仅保留最后一份快照） */
+    private ContextTraceEvent context;
     /** key = 工具调用 id（id 缺失时用合成序号），等待配对的工具请求（按发生顺序） */
     private final Map<String, PendingTool> pendingTools = new LinkedHashMap();
     /** 已完成配对的工具调用 id（多轮请求会重复携带历史结果，用于去重） */
@@ -127,6 +130,7 @@ public class TraceCollector {
         this.retrievals.clear();
         this.safeties.clear();
         this.delegationEvents.clear();
+        this.context = null;
         emit(new TraceResetEvent());
     }
 
@@ -290,6 +294,16 @@ public class TraceCollector {
         outputTokens += out;
         totalTokens += sum;
     }
+
+    /**
+     * 记录本轮上下文构成（P1-D）。不做实时下发：回合末由控制器在 usage 之前统一发一条，
+     * 避免工具循环中多次装配导致面板抖动。
+     */
+    public synchronized void recordContext(ContextTraceEvent event) {
+        this.context = event;
+    }
+
+    public synchronized ContextTraceEvent contextEvent() { return context; }
 
     public synchronized List<ToolTraceEvent> tools() { return List.copyOf(tools); }
     public synchronized List<RagTraceEvent> retrievals() { return List.copyOf(retrievals); }

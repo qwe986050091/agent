@@ -1,5 +1,6 @@
 package com.example.agent.rag;
 
+import com.example.agent.context.ContextBudget;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.TextContent;
 import dev.langchain4j.data.message.UserMessage;
@@ -35,11 +36,20 @@ public class TextFirstRetrievalAugmentor implements RetrievalAugmentor {
 
     private final ContentRetriever contentRetriever;
     private final ContentInjector contentInjector;
+    /** 请求级上下文预算（P1-D；null = 不裁剪，保持既有行为） */
+    private final ContextBudget budget;
 
     public TextFirstRetrievalAugmentor(ContentRetriever contentRetriever,
                                        ContentInjector contentInjector) {
+        this(contentRetriever, contentInjector, null);
+    }
+
+    public TextFirstRetrievalAugmentor(ContentRetriever contentRetriever,
+                                       ContentInjector contentInjector,
+                                       ContextBudget budget) {
         this.contentRetriever = contentRetriever;
         this.contentInjector = contentInjector;
+        this.budget = budget;
     }
 
     @Override
@@ -74,11 +84,21 @@ public class TextFirstRetrievalAugmentor implements RetrievalAugmentor {
                     .build();
         }
 
+        // 上下文预算（P1-D）：按检索预算保留高排名片段，尾部超预算片段直接丢弃；
+        // 预算极小导致全部丢弃时退化为无召回（对话继续，不注入）。
+        List<Content> kept = budget == null ? contents : budget.applyRetrieval(contents);
+        if (kept.isEmpty()) {
+            return AugmentationResult.builder()
+                    .chatMessage(chatMessage)
+                    .contents(List.of())
+                    .build();
+        }
+
         // LC4j 1.17.2 的 ContentInjector 契约：inject(contents, 原始 ChatMessage)
-        ChatMessage augmented = contentInjector.inject(contents, chatMessage);
+        ChatMessage augmented = contentInjector.inject(kept, chatMessage);
         return AugmentationResult.builder()
                 .chatMessage(augmented)
-                .contents(contents)
+                .contents(kept)
                 .build();
     }
 
