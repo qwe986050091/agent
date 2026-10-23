@@ -1,0 +1,1429 @@
+{
+  "environment": {
+    "os": "win32 10.0.26200",
+    "cpus": 32,
+    "totalMemGb": 31.2,
+    "java": "openjdk version \"21.0.12.1\" 2026-08-18 LTS | OpenJDK Runtime Environment Temurin-21.0.12.1+1 (build 21.0.12.1+1-LTS)",
+    "jar": "target\\simple-agent-1.0.0.jar",
+    "jarSizeMb": 252.1,
+    "stub": {
+      "chunks": 40,
+      "delayMs": 5,
+      "model": "stub-model"
+    },
+    "agentPool": {
+      "core": 8,
+      "max": 24,
+      "queue": 100,
+      "sseTimeoutMs": 300000
+    },
+    "repeats": 3,
+    "startedAt": "2026-10-23T15:52:30.452Z"
+  },
+  "results": [
+    {
+      "config": "g1",
+      "label": "G1（生产参数）",
+      "level": 100,
+      "repeats": 3,
+      "load": {
+        "total": 300,
+        "ok": 300,
+        "rejected503": 0,
+        "successRate": 1,
+        "wallMs": 2009.6,
+        "throughputRps": 149.28,
+        "latencyMs": {
+          "mean": 620.3,
+          "p50": 592.9,
+          "p95": 735.5,
+          "p99": 754.8,
+          "max": 762
+        },
+        "ttftMs": {
+          "p50": 23.6,
+          "p95": 141.9,
+          "p99": 152.2
+        }
+      },
+      "metrics": {
+        "peakHeapMb": 119.1,
+        "peakHeapWorstMb": 123.9,
+        "peakThreads": 198,
+        "peakSseActive": 19,
+        "peakProcessCpu": 0.245,
+        "gcCountDelta": 8,
+        "gcPauseTotalMsDelta": 57,
+        "gcPauseMaxSeconds": 0.012
+      },
+      "gc": {
+        "pauseCount": 10,
+        "totalMs": 73.604,
+        "maxMs": 16.217,
+        "fullCount": 0
+      },
+      "runs": [
+        {
+          "config": "g1",
+          "label": "G1（生产参数）",
+          "level": 100,
+          "requests": 300,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 100,
+              "requests": 300,
+              "timeoutMs": 60000
+            },
+            "total": 300,
+            "ok": 300,
+            "rejected503": 0,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 1,
+            "wallMs": 1989.8,
+            "throughputRps": 150.77,
+            "latencyMs": {
+              "mean": 608,
+              "p50": 589,
+              "p95": 735.5,
+              "p99": 751.2,
+              "max": 752.9
+            },
+            "ttftMs": {
+              "p50": 23.6,
+              "p95": 141.9,
+              "p99": 151.1
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 7,
+            "peakHeapMb": 123.9,
+            "peakThreads": 198,
+            "peakSseActive": 4,
+            "peakProcessCpu": 0.299,
+            "gcCountDelta": 8,
+            "gcPauseTotalMsDelta": 56,
+            "gcPauseMaxSeconds": 0.012,
+            "heapSeriesMb": [
+              57.3,
+              86.5,
+              101.1,
+              94.9,
+              105.9,
+              122.9,
+              123.9
+            ]
+          },
+          "gc": {
+            "pauseCount": 10,
+            "totalMs": 72.271,
+            "maxMs": 14.402,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:48:30.339+0800][12.225s][info][gc          ] GC(21) Pause Young (Concurrent Start) (G1 Evacuation Pause) 116M->66M(212M) 9.241ms",
+              "[2026-10-23T23:48:30.426+0800][12.312s][info][gc          ] GC(22) Pause Remark 98M->98M(212M) 14.402ms",
+              "[2026-10-23T23:48:30.454+0800][12.340s][info][gc          ] GC(22) Pause Cleanup 100M->100M(212M) 0.252ms"
+            ]
+          }
+        },
+        {
+          "config": "g1",
+          "label": "G1（生产参数）",
+          "level": 100,
+          "requests": 300,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 100,
+              "requests": 300,
+              "timeoutMs": 60000
+            },
+            "total": 300,
+            "ok": 300,
+            "rejected503": 0,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 1,
+            "wallMs": 2022.2,
+            "throughputRps": 148.36,
+            "latencyMs": {
+              "mean": 627.4,
+              "p50": 613.4,
+              "p95": 735.5,
+              "p99": 754.8,
+              "max": 762
+            },
+            "ttftMs": {
+              "p50": 30.8,
+              "p95": 140.7,
+              "p99": 152.2
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 6,
+            "peakHeapMb": 108.5,
+            "peakThreads": 189,
+            "peakSseActive": 19,
+            "peakProcessCpu": 0.245,
+            "gcCountDelta": 8,
+            "gcPauseTotalMsDelta": 58,
+            "gcPauseMaxSeconds": 0.01,
+            "heapSeriesMb": [
+              50.1,
+              75.9,
+              68.5,
+              87.2,
+              91.5,
+              108.5
+            ]
+          },
+          "gc": {
+            "pauseCount": 10,
+            "totalMs": 74.878,
+            "maxMs": 14.873,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:48:45.072+0800][12.202s][info][gc          ] GC(21) Pause Young (Concurrent Start) (G1 Evacuation Pause) 114M->66M(235M) 7.745ms",
+              "[2026-10-23T23:48:45.167+0800][12.298s][info][gc          ] GC(22) Pause Remark 84M->84M(224M) 14.873ms",
+              "[2026-10-23T23:48:45.190+0800][12.321s][info][gc          ] GC(22) Pause Cleanup 85M->85M(224M) 0.197ms"
+            ]
+          }
+        },
+        {
+          "config": "g1",
+          "label": "G1（生产参数）",
+          "level": 100,
+          "requests": 300,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 100,
+              "requests": 300,
+              "timeoutMs": 60000
+            },
+            "total": 300,
+            "ok": 300,
+            "rejected503": 0,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 1,
+            "wallMs": 2009.6,
+            "throughputRps": 149.28,
+            "latencyMs": {
+              "mean": 620.3,
+              "p50": 592.9,
+              "p95": 753.6,
+              "p99": 766.3,
+              "max": 771.6
+            },
+            "ttftMs": {
+              "p50": 17.5,
+              "p95": 165.3,
+              "p99": 173.5
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 7,
+            "peakHeapMb": 119.1,
+            "peakThreads": 213,
+            "peakSseActive": 0,
+            "peakProcessCpu": 0.225,
+            "gcCountDelta": 8,
+            "gcPauseTotalMsDelta": 57,
+            "gcPauseMaxSeconds": 0.012,
+            "heapSeriesMb": [
+              54,
+              82.8,
+              71.2,
+              92.7,
+              100.1,
+              117.1,
+              119.1
+            ]
+          },
+          "gc": {
+            "pauseCount": 10,
+            "totalMs": 73.604,
+            "maxMs": 16.217,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:48:59.948+0800][12.245s][info][gc          ] GC(21) Pause Young (Concurrent Start) (G1 Evacuation Pause) 115M->67M(232M) 7.558ms",
+              "[2026-10-23T23:49:00.049+0800][12.347s][info][gc          ] GC(22) Pause Remark 93M->93M(227M) 16.217ms",
+              "[2026-10-23T23:49:00.079+0800][12.377s][info][gc          ] GC(22) Pause Cleanup 96M->96M(227M) 0.131ms"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "config": "g1",
+      "label": "G1（生产参数）",
+      "level": 500,
+      "repeats": 3,
+      "load": {
+        "total": 500,
+        "ok": 254,
+        "rejected503": 246,
+        "successRate": 0.508,
+        "wallMs": 1391,
+        "throughputRps": 182.94,
+        "latencyMs": {
+          "mean": 1204.5,
+          "p50": 1290,
+          "p95": 1360.4,
+          "p99": 1372.2,
+          "max": 1372.6
+        },
+        "ttftMs": {
+          "p50": 401.3,
+          "p95": 472.4,
+          "p99": 478.3
+        }
+      },
+      "metrics": {
+        "peakHeapMb": 199.8,
+        "peakHeapWorstMb": 203.6,
+        "peakThreads": 369,
+        "peakSseActive": 123,
+        "peakProcessCpu": 0.207,
+        "gcCountDelta": 7,
+        "gcPauseTotalMsDelta": 56,
+        "gcPauseMaxSeconds": 0.013
+      },
+      "gc": {
+        "pauseCount": 9,
+        "totalMs": 75.406,
+        "maxMs": 18.6,
+        "fullCount": 0
+      },
+      "runs": [
+        {
+          "config": "g1",
+          "label": "G1（生产参数）",
+          "level": 500,
+          "requests": 500,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 500,
+              "requests": 500,
+              "timeoutMs": 60000
+            },
+            "total": 500,
+            "ok": 254,
+            "rejected503": 246,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 0.508,
+            "wallMs": 1395.3,
+            "throughputRps": 182.03,
+            "latencyMs": {
+              "mean": 1204.5,
+              "p50": 1295,
+              "p95": 1366.4,
+              "p99": 1372.2,
+              "max": 1378.4
+            },
+            "ttftMs": {
+              "p50": 401.3,
+              "p95": 487.9,
+              "p99": 495.1
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 5,
+            "peakHeapMb": 152.9,
+            "peakThreads": 369,
+            "peakSseActive": 115,
+            "peakProcessCpu": 0.219,
+            "gcCountDelta": 7,
+            "gcPauseTotalMsDelta": 54,
+            "gcPauseMaxSeconds": 0.012,
+            "heapSeriesMb": [
+              55.2,
+              71.9,
+              99.9,
+              136.9,
+              152.9
+            ]
+          },
+          "gc": {
+            "pauseCount": 9,
+            "totalMs": 72.808,
+            "maxMs": 16.098,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:49:13.727+0800][11.246s][info][gc          ] GC(18) Pause Remark 142M->142M(260M) 16.098ms",
+              "[2026-10-23T23:49:13.763+0800][11.283s][info][gc          ] GC(18) Pause Cleanup 178M->178M(260M) 0.167ms",
+              "[2026-10-23T23:49:13.914+0800][11.433s][info][gc          ] GC(21) Pause Young (Prepare Mixed) (G1 Evacuation Pause) 190M->85M(260M) 9.947ms"
+            ]
+          }
+        },
+        {
+          "config": "g1",
+          "label": "G1（生产参数）",
+          "level": 500,
+          "requests": 500,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 500,
+              "requests": 500,
+              "timeoutMs": 60000
+            },
+            "total": 500,
+            "ok": 232,
+            "rejected503": 268,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 0.464,
+            "wallMs": 1268.2,
+            "throughputRps": 182.94,
+            "latencyMs": {
+              "mean": 1088,
+              "p50": 1162.3,
+              "p95": 1242,
+              "p99": 1253,
+              "max": 1254.3
+            },
+            "ttftMs": {
+              "p50": 341.4,
+              "p95": 472.4,
+              "p99": 478.3
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 5,
+            "peakHeapMb": 199.8,
+            "peakThreads": 376,
+            "peakSseActive": 121,
+            "peakProcessCpu": 0.207,
+            "gcCountDelta": 7,
+            "gcPauseTotalMsDelta": 56,
+            "gcPauseMaxSeconds": 0.013,
+            "heapSeriesMb": [
+              54.4,
+              76,
+              199.8,
+              122.1,
+              123.1
+            ]
+          },
+          "gc": {
+            "pauseCount": 9,
+            "totalMs": 75.406,
+            "maxMs": 16.203,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:49:27.841+0800][11.422s][info][gc          ] GC(18) Pause Remark 137M->137M(260M) 16.203ms",
+              "[2026-10-23T23:49:27.878+0800][11.460s][info][gc          ] GC(18) Pause Cleanup 169M->169M(260M) 0.194ms",
+              "[2026-10-23T23:49:28.290+0800][11.871s][info][gc          ] GC(21) Pause Young (Prepare Mixed) (G1 Evacuation Pause) 208M->89M(260M) 9.654ms"
+            ]
+          }
+        },
+        {
+          "config": "g1",
+          "label": "G1（生产参数）",
+          "level": 500,
+          "requests": 500,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 500,
+              "requests": 500,
+              "timeoutMs": 60000
+            },
+            "total": 500,
+            "ok": 260,
+            "rejected503": 240,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 0.52,
+            "wallMs": 1391,
+            "throughputRps": 186.92,
+            "latencyMs": {
+              "mean": 1209,
+              "p50": 1290,
+              "p95": 1360.4,
+              "p99": 1372.3,
+              "max": 1372.6
+            },
+            "ttftMs": {
+              "p50": 419.1,
+              "p95": 464.7,
+              "p99": 473.2
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 5,
+            "peakHeapMb": 203.6,
+            "peakThreads": 368,
+            "peakSseActive": 123,
+            "peakProcessCpu": 0.204,
+            "gcCountDelta": 7,
+            "gcPauseTotalMsDelta": 58,
+            "gcPauseMaxSeconds": 0.012,
+            "heapSeriesMb": [
+              54.9,
+              70.5,
+              203.6,
+              118,
+              133
+            ]
+          },
+          "gc": {
+            "pauseCount": 9,
+            "totalMs": 77.993,
+            "maxMs": 18.6,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:49:41.601+0800][11.020s][info][gc          ] GC(18) Pause Remark 135M->135M(260M) 18.600ms",
+              "[2026-10-23T23:49:41.637+0800][11.055s][info][gc          ] GC(18) Pause Cleanup 174M->174M(260M) 0.173ms",
+              "[2026-10-23T23:49:42.107+0800][11.525s][info][gc          ] GC(21) Pause Young (Prepare Mixed) (G1 Evacuation Pause) 218M->90M(260M) 9.316ms"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "config": "zgc",
+      "label": "ZGC（对照）",
+      "level": 100,
+      "repeats": 3,
+      "load": {
+        "total": 300,
+        "ok": 300,
+        "rejected503": 0,
+        "successRate": 1,
+        "wallMs": 1980.6,
+        "throughputRps": 151.47,
+        "latencyMs": {
+          "mean": 613.9,
+          "p50": 605.5,
+          "p95": 706.3,
+          "p99": 729.6,
+          "max": 733.8
+        },
+        "ttftMs": {
+          "p50": 17.6,
+          "p95": 134.5,
+          "p99": 147.5
+        }
+      },
+      "metrics": {
+        "peakHeapMb": 332,
+        "peakHeapWorstMb": 336,
+        "peakThreads": 208,
+        "peakSseActive": 10,
+        "peakProcessCpu": 0.276,
+        "gcCountDelta": 9,
+        "gcPauseTotalMsDelta": 0,
+        "gcPauseMaxSeconds": 0
+      },
+      "gc": {
+        "pauseCount": 12,
+        "totalMs": 0.304,
+        "maxMs": 0.059,
+        "fullCount": 0
+      },
+      "runs": [
+        {
+          "config": "zgc",
+          "label": "ZGC（对照）",
+          "level": 100,
+          "requests": 300,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 100,
+              "requests": 300,
+              "timeoutMs": 60000
+            },
+            "total": 300,
+            "ok": 300,
+            "rejected503": 0,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 1,
+            "wallMs": 1980.6,
+            "throughputRps": 151.47,
+            "latencyMs": {
+              "mean": 613.9,
+              "p50": 605.5,
+              "p95": 724.9,
+              "p99": 746,
+              "max": 749
+            },
+            "ttftMs": {
+              "p50": 17.3,
+              "p95": 137.2,
+              "p99": 147.5
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 7,
+            "peakHeapMb": 316,
+            "peakThreads": 208,
+            "peakSseActive": 5,
+            "peakProcessCpu": 0.338,
+            "gcCountDelta": 10,
+            "gcPauseTotalMsDelta": 0,
+            "gcPauseMaxSeconds": 0,
+            "heapSeriesMb": [
+              130,
+              316,
+              252,
+              130,
+              284,
+              286,
+              288
+            ]
+          },
+          "gc": {
+            "pauseCount": 12,
+            "totalMs": 0.318,
+            "maxMs": 0.059,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:49:57.545+0800][13.167s][info][gc,phases   ] GC(7) Pause Mark Start 0.024ms",
+              "[2026-10-23T23:49:57.660+0800][13.282s][info][gc,phases   ] GC(7) Pause Mark End 0.059ms",
+              "[2026-10-23T23:49:57.690+0800][13.311s][info][gc,phases   ] GC(7) Pause Relocate Start 0.026ms"
+            ]
+          }
+        },
+        {
+          "config": "zgc",
+          "label": "ZGC（对照）",
+          "level": 100,
+          "requests": 300,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 100,
+              "requests": 300,
+              "timeoutMs": 60000
+            },
+            "total": 300,
+            "ok": 300,
+            "rejected503": 0,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 1,
+            "wallMs": 1946.6,
+            "throughputRps": 154.11,
+            "latencyMs": {
+              "mean": 598.6,
+              "p50": 586.1,
+              "p95": 706.3,
+              "p99": 729.6,
+              "max": 733.8
+            },
+            "ttftMs": {
+              "p50": 43.7,
+              "p95": 134.5,
+              "p99": 148.6
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 7,
+            "peakHeapMb": 332,
+            "peakThreads": 239,
+            "peakSseActive": 10,
+            "peakProcessCpu": 0.25,
+            "gcCountDelta": 9,
+            "gcPauseTotalMsDelta": 0,
+            "gcPauseMaxSeconds": 0,
+            "heapSeriesMb": [
+              136,
+              332,
+              234,
+              108,
+              284,
+              298,
+              298
+            ]
+          },
+          "gc": {
+            "pauseCount": 12,
+            "totalMs": 0.304,
+            "maxMs": 0.042,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:50:12.563+0800][13.261s][info][gc,phases   ] GC(7) Pause Mark Start 0.021ms",
+              "[2026-10-23T23:50:12.658+0800][13.356s][info][gc,phases   ] GC(7) Pause Mark End 0.028ms",
+              "[2026-10-23T23:50:12.688+0800][13.385s][info][gc,phases   ] GC(7) Pause Relocate Start 0.025ms"
+            ]
+          }
+        },
+        {
+          "config": "zgc",
+          "label": "ZGC（对照）",
+          "level": 100,
+          "requests": 300,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 100,
+              "requests": 300,
+              "timeoutMs": 60000
+            },
+            "total": 300,
+            "ok": 300,
+            "rejected503": 0,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 1,
+            "wallMs": 2025.2,
+            "throughputRps": 148.13,
+            "latencyMs": {
+              "mean": 632.4,
+              "p50": 637.3,
+              "p95": 687,
+              "p99": 705.9,
+              "max": 710.6
+            },
+            "ttftMs": {
+              "p50": 17.6,
+              "p95": 124.3,
+              "p99": 136.4
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 6,
+            "peakHeapMb": 336,
+            "peakThreads": 184,
+            "peakSseActive": 5,
+            "peakProcessCpu": 0.276,
+            "gcCountDelta": 9,
+            "gcPauseTotalMsDelta": 0,
+            "gcPauseMaxSeconds": 0,
+            "heapSeriesMb": [
+              130,
+              336,
+              248,
+              214,
+              278,
+              286
+            ]
+          },
+          "gc": {
+            "pauseCount": 9,
+            "totalMs": 0.229,
+            "maxMs": 0.032,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:50:25.572+0800][11.455s][info][gc,phases   ] GC(6) Pause Mark Start 0.032ms",
+              "[2026-10-23T23:50:25.726+0800][11.609s][info][gc,phases   ] GC(6) Pause Mark End 0.028ms",
+              "[2026-10-23T23:50:25.768+0800][11.651s][info][gc,phases   ] GC(6) Pause Relocate Start 0.023ms"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "config": "zgc",
+      "label": "ZGC（对照）",
+      "level": 500,
+      "repeats": 3,
+      "load": {
+        "total": 500,
+        "ok": 235,
+        "rejected503": 265,
+        "successRate": 0.47,
+        "wallMs": 1154,
+        "throughputRps": 204.1,
+        "latencyMs": {
+          "mean": 1042.1,
+          "p50": 1073.2,
+          "p95": 1125.3,
+          "p99": 1130.3,
+          "max": 1131.9
+        },
+        "ttftMs": {
+          "p50": 359.2,
+          "p95": 387.3,
+          "p99": 387.7
+        }
+      },
+      "metrics": {
+        "peakHeapMb": 356,
+        "peakHeapWorstMb": 384,
+        "peakThreads": 347,
+        "peakSseActive": 124,
+        "peakProcessCpu": 0.282,
+        "gcCountDelta": 12,
+        "gcPauseTotalMsDelta": 0,
+        "gcPauseMaxSeconds": 0
+      },
+      "gc": {
+        "pauseCount": 22,
+        "totalMs": 0.451,
+        "maxMs": 0.053,
+        "fullCount": 0
+      },
+      "runs": [
+        {
+          "config": "zgc",
+          "label": "ZGC（对照）",
+          "level": 500,
+          "requests": 500,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 500,
+              "requests": 500,
+              "timeoutMs": 60000
+            },
+            "total": 500,
+            "ok": 235,
+            "rejected503": 265,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 0.47,
+            "wallMs": 1160.1,
+            "throughputRps": 202.56,
+            "latencyMs": {
+              "mean": 1042.4,
+              "p50": 1073.2,
+              "p95": 1125.3,
+              "p99": 1133.7,
+              "max": 1133.9
+            },
+            "ttftMs": {
+              "p50": 359.2,
+              "p95": 387.3,
+              "p99": 387.7
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 5,
+            "peakHeapMb": 356,
+            "peakThreads": 347,
+            "peakSseActive": 124,
+            "peakProcessCpu": 0.281,
+            "gcCountDelta": 12,
+            "gcPauseTotalMsDelta": 0,
+            "gcPauseMaxSeconds": 0,
+            "heapSeriesMb": [
+              128,
+              356,
+              304,
+              198,
+              138
+            ]
+          },
+          "gc": {
+            "pauseCount": 22,
+            "totalMs": 0.445,
+            "maxMs": 0.053,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:50:40.582+0800][11.866s][info][gc,phases   ] GC(9) Pause Mark Start 0.026ms",
+              "[2026-10-23T23:50:40.666+0800][11.951s][info][gc,phases   ] GC(9) Pause Mark End 0.041ms",
+              "[2026-10-23T23:50:40.685+0800][11.970s][info][gc,phases   ] GC(9) Pause Relocate Start 0.018ms"
+            ]
+          }
+        },
+        {
+          "config": "zgc",
+          "label": "ZGC（对照）",
+          "level": 500,
+          "requests": 500,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 500,
+              "requests": 500,
+              "timeoutMs": 60000
+            },
+            "total": 500,
+            "ok": 232,
+            "rejected503": 268,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 0.464,
+            "wallMs": 1136.7,
+            "throughputRps": 204.1,
+            "latencyMs": {
+              "mean": 1019.1,
+              "p50": 1069.5,
+              "p95": 1116,
+              "p99": 1116.5,
+              "max": 1116.8
+            },
+            "ttftMs": {
+              "p50": 370.1,
+              "p95": 398.5,
+              "p99": 399.2
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 5,
+            "peakHeapMb": 340,
+            "peakThreads": 331,
+            "peakSseActive": 124,
+            "peakProcessCpu": 0.282,
+            "gcCountDelta": 12,
+            "gcPauseTotalMsDelta": 0,
+            "gcPauseMaxSeconds": 0,
+            "heapSeriesMb": [
+              130,
+              340,
+              340,
+              196,
+              138
+            ]
+          },
+          "gc": {
+            "pauseCount": 22,
+            "totalMs": 0.451,
+            "maxMs": 0.043,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:50:52.892+0800][10.956s][info][gc,phases   ] GC(9) Pause Mark Start 0.022ms",
+              "[2026-10-23T23:50:52.959+0800][11.023s][info][gc,phases   ] GC(9) Pause Mark End 0.026ms",
+              "[2026-10-23T23:50:52.976+0800][11.041s][info][gc,phases   ] GC(9) Pause Relocate Start 0.012ms"
+            ]
+          }
+        },
+        {
+          "config": "zgc",
+          "label": "ZGC（对照）",
+          "level": 500,
+          "requests": 500,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 500,
+              "requests": 500,
+              "timeoutMs": 60000
+            },
+            "total": 500,
+            "ok": 242,
+            "rejected503": 258,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 0.484,
+            "wallMs": 1154,
+            "throughputRps": 209.7,
+            "latencyMs": {
+              "mean": 1042.1,
+              "p50": 1086,
+              "p95": 1129.5,
+              "p99": 1130.3,
+              "max": 1131.9
+            },
+            "ttftMs": {
+              "p50": 336.8,
+              "p95": 360.5,
+              "p99": 361.3
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 5,
+            "peakHeapMb": 384,
+            "peakThreads": 351,
+            "peakSseActive": 123,
+            "peakProcessCpu": 0.285,
+            "gcCountDelta": 12,
+            "gcPauseTotalMsDelta": 0,
+            "gcPauseMaxSeconds": 0,
+            "heapSeriesMb": [
+              128,
+              384,
+              324,
+              174,
+              176
+            ]
+          },
+          "gc": {
+            "pauseCount": 25,
+            "totalMs": 0.503,
+            "maxMs": 0.041,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:51:05.732+0800][11.452s][info][gc,phases   ] GC(10) Pause Mark Start 0.024ms",
+              "[2026-10-23T23:51:05.823+0800][11.542s][info][gc,phases   ] GC(10) Pause Mark End 0.032ms",
+              "[2026-10-23T23:51:05.848+0800][11.568s][info][gc,phases   ] GC(10) Pause Relocate Start 0.024ms"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "config": "g1-tuned",
+      "label": "G1 调优（Xms=Xmx + MaxGCPauseMillis=100）",
+      "level": 100,
+      "repeats": 3,
+      "load": {
+        "total": 300,
+        "ok": 300,
+        "rejected503": 0,
+        "successRate": 1,
+        "wallMs": 1978.4,
+        "throughputRps": 151.63,
+        "latencyMs": {
+          "mean": 616.2,
+          "p50": 611,
+          "p95": 715.2,
+          "p99": 734.4,
+          "max": 737.9
+        },
+        "ttftMs": {
+          "p50": 18.8,
+          "p95": 126.7,
+          "p99": 143.7
+        }
+      },
+      "metrics": {
+        "peakHeapMb": 381.3,
+        "peakHeapWorstMb": 445.5,
+        "peakThreads": 183,
+        "peakSseActive": 8,
+        "peakProcessCpu": 0.267,
+        "gcCountDelta": 1,
+        "gcPauseTotalMsDelta": 26,
+        "gcPauseMaxSeconds": 0.026
+      },
+      "gc": {
+        "pauseCount": 1,
+        "totalMs": 26.148,
+        "maxMs": 26.148,
+        "fullCount": 0
+      },
+      "runs": [
+        {
+          "config": "g1-tuned",
+          "label": "G1 调优（Xms=Xmx + MaxGCPauseMillis=100）",
+          "level": 100,
+          "requests": 300,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 100,
+              "requests": 300,
+              "timeoutMs": 60000
+            },
+            "total": 300,
+            "ok": 300,
+            "rejected503": 0,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 1,
+            "wallMs": 1988.2,
+            "throughputRps": 150.89,
+            "latencyMs": {
+              "mean": 627.1,
+              "p50": 619.2,
+              "p95": 727.8,
+              "p99": 743.8,
+              "max": 748.3
+            },
+            "ttftMs": {
+              "p50": 31.4,
+              "p95": 129.5,
+              "p99": 143.7
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 7,
+            "peakHeapMb": 247.3,
+            "peakThreads": 190,
+            "peakSseActive": 7,
+            "peakProcessCpu": 0.255,
+            "gcCountDelta": 2,
+            "gcPauseTotalMsDelta": 42,
+            "gcPauseMaxSeconds": 0.022,
+            "heapSeriesMb": [
+              95.3,
+              247.3,
+              136.6,
+              216.6,
+              184.6,
+              200.6,
+              200.6
+            ]
+          },
+          "gc": {
+            "pauseCount": 2,
+            "totalMs": 42.339,
+            "maxMs": 22.053,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:51:17.771+0800][10.679s][info][gc          ] GC(11) Pause Young (Normal) (G1 Evacuation Pause) 267M->48M(768M) 22.053ms",
+              "[2026-10-23T23:51:18.418+0800][11.326s][info][gc          ] GC(12) Pause Young (Normal) (G1 Evacuation Pause) 240M->52M(768M) 20.286ms"
+            ]
+          }
+        },
+        {
+          "config": "g1-tuned",
+          "label": "G1 调优（Xms=Xmx + MaxGCPauseMillis=100）",
+          "level": 100,
+          "requests": 300,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 100,
+              "requests": 300,
+              "timeoutMs": 60000
+            },
+            "total": 300,
+            "ok": 300,
+            "rejected503": 0,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 1,
+            "wallMs": 1960.5,
+            "throughputRps": 153.02,
+            "latencyMs": {
+              "mean": 609.3,
+              "p50": 611,
+              "p95": 685.9,
+              "p99": 702.3,
+              "max": 706.5
+            },
+            "ttftMs": {
+              "p50": 18.8,
+              "p95": 119.7,
+              "p99": 137.5
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 7,
+            "peakHeapMb": 381.3,
+            "peakThreads": 183,
+            "peakSseActive": 3,
+            "peakProcessCpu": 0.276,
+            "gcCountDelta": 1,
+            "gcPauseTotalMsDelta": 24,
+            "gcPauseMaxSeconds": 0.024,
+            "heapSeriesMb": [
+              113.3,
+              281.3,
+              381.3,
+              87.3,
+              243.3,
+              267.3,
+              267.3
+            ]
+          },
+          "gc": {
+            "pauseCount": 1,
+            "totalMs": 24.563,
+            "maxMs": 24.563,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:51:32.167+0800][11.137s][info][gc          ] GC(11) Pause Young (Normal) (G1 Evacuation Pause) 409M->51M(768M) 24.563ms"
+            ]
+          }
+        },
+        {
+          "config": "g1-tuned",
+          "label": "G1 调优（Xms=Xmx + MaxGCPauseMillis=100）",
+          "level": 100,
+          "requests": 300,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 100,
+              "requests": 300,
+              "timeoutMs": 60000
+            },
+            "total": 300,
+            "ok": 300,
+            "rejected503": 0,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 1,
+            "wallMs": 1978.4,
+            "throughputRps": 151.63,
+            "latencyMs": {
+              "mean": 616.2,
+              "p50": 603.5,
+              "p95": 715.2,
+              "p99": 734.4,
+              "max": 737.9
+            },
+            "ttftMs": {
+              "p50": 17.3,
+              "p95": 126.7,
+              "p99": 146.7
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 7,
+            "peakHeapMb": 445.5,
+            "peakThreads": 180,
+            "peakSseActive": 8,
+            "peakProcessCpu": 0.267,
+            "gcCountDelta": 1,
+            "gcPauseTotalMsDelta": 26,
+            "gcPauseMaxSeconds": 0.026,
+            "heapSeriesMb": [
+              113.5,
+              289.5,
+              373.5,
+              445.5,
+              203.2,
+              227.2,
+              227.2
+            ]
+          },
+          "gc": {
+            "pauseCount": 1,
+            "totalMs": 26.148,
+            "maxMs": 26.148,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:51:46.932+0800][11.620s][info][gc          ] GC(11) Pause Young (Normal) (G1 Evacuation Pause) 461M->51M(768M) 26.148ms"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "config": "g1-tuned",
+      "label": "G1 调优（Xms=Xmx + MaxGCPauseMillis=100）",
+      "level": 500,
+      "repeats": 3,
+      "load": {
+        "total": 500,
+        "ok": 240,
+        "rejected503": 260,
+        "successRate": 0.48,
+        "wallMs": 1246.1,
+        "throughputRps": 182.49,
+        "latencyMs": {
+          "mean": 1110,
+          "p50": 1161.3,
+          "p95": 1223.3,
+          "p99": 1225.2,
+          "max": 1225.4
+        },
+        "ttftMs": {
+          "p50": 353,
+          "p95": 401.2,
+          "p99": 410.8
+        }
+      },
+      "metrics": {
+        "peakHeapMb": 337.6,
+        "peakHeapWorstMb": 358.6,
+        "peakThreads": 372,
+        "peakSseActive": 125,
+        "peakProcessCpu": 0.237,
+        "gcCountDelta": 2,
+        "gcPauseTotalMsDelta": 53,
+        "gcPauseMaxSeconds": 0.034
+      },
+      "gc": {
+        "pauseCount": 2,
+        "totalMs": 52.572,
+        "maxMs": 34.283,
+        "fullCount": 0
+      },
+      "runs": [
+        {
+          "config": "g1-tuned",
+          "label": "G1 调优（Xms=Xmx + MaxGCPauseMillis=100）",
+          "level": 500,
+          "requests": 500,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 500,
+              "requests": 500,
+              "timeoutMs": 60000
+            },
+            "total": 500,
+            "ok": 240,
+            "rejected503": 260,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 0.48,
+            "wallMs": 1246.1,
+            "throughputRps": 192.6,
+            "latencyMs": {
+              "mean": 1110,
+              "p50": 1161.3,
+              "p95": 1223.3,
+              "p99": 1225.2,
+              "max": 1225.4
+            },
+            "ttftMs": {
+              "p50": 355.4,
+              "p95": 401.2,
+              "p99": 410.8
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 5,
+            "peakHeapMb": 203.9,
+            "peakThreads": 345,
+            "peakSseActive": 125,
+            "peakProcessCpu": 0.249,
+            "gcCountDelta": 2,
+            "gcPauseTotalMsDelta": 53,
+            "gcPauseMaxSeconds": 0.033,
+            "heapSeriesMb": [
+              71.9,
+              68,
+              167.9,
+              203.9,
+              203.9
+            ]
+          },
+          "gc": {
+            "pauseCount": 2,
+            "totalMs": 52.572,
+            "maxMs": 32.615,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:52:00.460+0800][10.832s][info][gc          ] GC(11) Pause Young (Normal) (G1 Evacuation Pause) 259M->60M(768M) 32.615ms",
+              "[2026-10-23T23:52:00.567+0800][10.938s][info][gc          ] GC(12) Pause Young (Normal) (G1 Evacuation Pause) 180M->71M(768M) 19.957ms"
+            ]
+          }
+        },
+        {
+          "config": "g1-tuned",
+          "label": "G1 调优（Xms=Xmx + MaxGCPauseMillis=100）",
+          "level": 500,
+          "requests": 500,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 500,
+              "requests": 500,
+              "timeoutMs": 60000
+            },
+            "total": 500,
+            "ok": 259,
+            "rejected503": 241,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 0.518,
+            "wallMs": 1495.1,
+            "throughputRps": 173.23,
+            "latencyMs": {
+              "mean": 1336.8,
+              "p50": 1402,
+              "p95": 1472.8,
+              "p99": 1475.6,
+              "max": 1476.7
+            },
+            "ttftMs": {
+              "p50": 351.6,
+              "p95": 426.4,
+              "p99": 434.7
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 5,
+            "peakHeapMb": 358.6,
+            "peakThreads": 372,
+            "peakSseActive": 124,
+            "peakProcessCpu": 0.237,
+            "gcCountDelta": 2,
+            "gcPauseTotalMsDelta": 57,
+            "gcPauseMaxSeconds": 0.034,
+            "heapSeriesMb": [
+              99.9,
+              71.8,
+              298.6,
+              330.6,
+              358.6
+            ]
+          },
+          "gc": {
+            "pauseCount": 2,
+            "totalMs": 57.375,
+            "maxMs": 34.283,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:52:13.884+0800][10.635s][info][gc          ] GC(11) Pause Young (Normal) (G1 Evacuation Pause) 275M->59M(768M) 34.283ms",
+              "[2026-10-23T23:52:13.915+0800][10.667s][info][gc          ] GC(12) Pause Young (Normal) (G1 Evacuation Pause) 83M->66M(768M) 23.092ms"
+            ]
+          }
+        },
+        {
+          "config": "g1-tuned",
+          "label": "G1 调优（Xms=Xmx + MaxGCPauseMillis=100）",
+          "level": 500,
+          "requests": 500,
+          "load": {
+            "params": {
+              "url": "http://127.0.0.1:18090/api/agent/chat/stream",
+              "concurrency": 500,
+              "requests": 500,
+              "timeoutMs": 60000
+            },
+            "total": 500,
+            "ok": 200,
+            "rejected503": 300,
+            "otherStatus": 0,
+            "networkErrors": 0,
+            "successRate": 0.4,
+            "wallMs": 1096,
+            "throughputRps": 182.49,
+            "latencyMs": {
+              "mean": 993.7,
+              "p50": 1032,
+              "p95": 1072.1,
+              "p99": 1082.1,
+              "max": 1082.9
+            },
+            "ttftMs": {
+              "p50": 353,
+              "p95": 362.7,
+              "p99": 365.6
+            },
+            "errorSamples": []
+          },
+          "metrics": {
+            "samples": 4,
+            "peakHeapMb": 337.6,
+            "peakThreads": 388,
+            "peakSseActive": 101,
+            "peakProcessCpu": 0.231,
+            "gcCountDelta": 1,
+            "gcPauseTotalMsDelta": 34,
+            "gcPauseMaxSeconds": 0.034,
+            "heapSeriesMb": [
+              113.6,
+              337.6,
+              109.6,
+              165.6
+            ]
+          },
+          "gc": {
+            "pauseCount": 1,
+            "totalMs": 33.708,
+            "maxMs": 33.708,
+            "fullCount": 0,
+            "samples": [
+              "[2026-10-23T23:52:27.713+0800][10.826s][info][gc          ] GC(11) Pause Young (Normal) (G1 Evacuation Pause) 469M->65M(768M) 33.708ms"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

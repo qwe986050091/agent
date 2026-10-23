@@ -1,0 +1,5 @@
+# 压测中间产物：GC 日志、逐轮 JSON、agent 日志不入库
+results/*
+!results/p2g-final/
+results/p2g-final/*
+!results/p2g-final/summary.json

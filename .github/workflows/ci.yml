@@ -17,5 +17,6 @@ jobs:
           java-version: '21'
           cache: maven
       # 强制 clean：防 IDE 增量编译污染产物的坑（本项目踩过：错误桩进 jar）
-      - name: Test
-        run: ./mvnw -B clean test
+      # verify：跑测试 + JaCoCo 行覆盖率门禁（check 绑定在 verify 阶段，低于阈值即 fail）
+      - name: Test & Coverage
+        run: ./mvnw -B clean verify
