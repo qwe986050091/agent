@@ -1,5 +1,8 @@
 server:
   port: 8080
+  # 优雅停机：SIGTERM 后先拒绝新请求、等待在途请求（含 SSE 流）完成再退出，
+  # 配合蓝绿发布（agent-blue / agent-green 双槽位）做到发布零中断
+  shutdown: graceful
 
 # ===== 管理端口（actuator/prometheus） =====
 # 独立端口且只绑 127.0.0.1：只供本机 Prometheus 抓取/排障，
@@ -20,6 +23,9 @@ management:
 spring:
   application:
     name: simple-agent
+  # 优雅停机最长等待在途请求的时间（需小于 systemd TimeoutStopSec=45s）
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
   # 知识库文档上传（P1-9.2：PDF/Word/Excel 等二进制文档，backend 转发原始字节）
   servlet:
     multipart:
