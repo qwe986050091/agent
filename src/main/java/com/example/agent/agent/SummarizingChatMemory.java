@@ -1,8 +1,12 @@
 package com.example.agent.agent;
 
+import com.example.agent.context.ToolResultGovernor;
+import com.example.agent.hooks.AgentHookEvent;
+import com.example.agent.hooks.HookContextHolder;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.memory.ChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
@@ -43,10 +47,16 @@ public class SummarizingChatMemory implements ChatMemory {
             这是历史信息，请以用户的当前诉求为准。若当前问题与摘要冲突，以当前对话为准。
             """;
 
-    /** 引导模型压缩对话的提示词 */
+    /** 引导模型压缩对话的提示词（P1：结构化，压缩后保留任务状态，避免压缩点断上下文） */
     private static final String SUMMARIZE_PROMPT = """
             请把下面的对话历史压缩成一段简洁、连贯的中文摘要，用于长期保持上下文。
             要求：
+            - 按下面的小节组织；没有内容的小节可以省略，但【任务目标】【未完成】必须显式写出（没有未完成事项写「无」）
+              【任务目标】用户最终想完成什么
+              【已完成】已确认的结论、已成功执行的关键步骤
+              【未完成】仍待处理的事项与下一步
+              【关键事实】重要数据、来源、工具调用结论（失败的调用要写失败原因）
+              【用户偏好】用户明确表达的身份、偏好与约束
             - 保留关键的已交代事实、用户偏好与身份信息、未完成的任务、重要的工具调用结果
             - 逻辑清晰、语言精炼，控制在合理长度内
             - 不要编造历史中不存在的内容
@@ -62,6 +72,8 @@ public class SummarizingChatMemory implements ChatMemory {
 
     private final Object id;
     private final ChatModel summarizerModel;
+    /** 工具结果治理器（P0）：ReAct 循环内单条/累计超限时截断或清理；null = 不治理 */
+    private final ToolResultGovernor toolResultGovernor;
 
     /** 超过该条数即触发一次压缩 */
     private final int maxMessages;
@@ -72,6 +84,11 @@ public class SummarizingChatMemory implements ChatMemory {
     private final List<ChatMessage> messages = new ArrayList<>();
 
     public SummarizingChatMemory(Object id, ChatModel summarizerModel, int maxMessages, int keepRecent) {
+        this(id, summarizerModel, maxMessages, keepRecent, null);
+    }
+
+    public SummarizingChatMemory(Object id, ChatModel summarizerModel, int maxMessages, int keepRecent,
+                                 ToolResultGovernor toolResultGovernor) {
         if (keepRecent >= maxMessages) {
             throw new IllegalArgumentException("keepRecent(" + keepRecent + ") 必须小于 maxMessages(" + maxMessages + ")，否则永远不会触发压缩");
         }
@@ -79,6 +96,7 @@ public class SummarizingChatMemory implements ChatMemory {
         this.summarizerModel = summarizerModel;
         this.maxMessages = maxMessages;
         this.keepRecent = keepRecent;
+        this.toolResultGovernor = toolResultGovernor;
     }
 
     /**
@@ -90,7 +108,20 @@ public class SummarizingChatMemory implements ChatMemory {
     public static SummarizingChatMemory restore(Object id, ChatModel summarizerModel,
                                                 int maxMessages, int keepRecent,
                                                 String summaryText, List<HistoryMessage> history) {
-        SummarizingChatMemory memory = new SummarizingChatMemory(id, summarizerModel, maxMessages, keepRecent);
+        return restore(id, summarizerModel, maxMessages, keepRecent, summaryText, history, null);
+    }
+
+    /**
+     * 按 backend 持久化的状态重建记忆，并挂上工具结果治理器（P0）。
+     *
+     * @param toolResultGovernor 回合内工具结果预算器；null = 不治理（单测/降级）
+     */
+    public static SummarizingChatMemory restore(Object id, ChatModel summarizerModel,
+                                                int maxMessages, int keepRecent,
+                                                String summaryText, List<HistoryMessage> history,
+                                                ToolResultGovernor toolResultGovernor) {
+        SummarizingChatMemory memory = new SummarizingChatMemory(
+                id, summarizerModel, maxMessages, keepRecent, toolResultGovernor);
         if (summaryText != null && !summaryText.isBlank()) {
             memory.messages.add(SystemMessage.from(SUMMARY_PREFIX + "\n" + summaryText.trim()));
         }
@@ -130,6 +161,10 @@ public class SummarizingChatMemory implements ChatMemory {
     @Override
     public synchronized void add(ChatMessage message) {
         messages.add(message);
+        // 工具结果治理（P0）：先做单条截断与累计淘汰，再判断是否触发语义压缩
+        if (toolResultGovernor != null && message instanceof ToolExecutionResultMessage) {
+            toolResultGovernor.govern(messages);
+        }
         // 达到窗口上限时，把最早的一部分压成摘要，仅保留最近 keepRecent 条原文
         if (messages.size() > maxMessages) {
             compress();
@@ -204,10 +239,14 @@ public class SummarizingChatMemory implements ChatMemory {
         }
 
         // 重组：非摘要系统指令 + 单条新摘要 + 最近对话
+        int beforeMessages = messages.size();
         messages.clear();
         messages.addAll(systemMessages);
         messages.add(SystemMessage.from(SUMMARY_PREFIX + "\n" + summary.trim()));
         messages.addAll(keep);
+        // 旁路通知（审计/联动）：压缩完成，压缩前后消息数可见
+        HookContextHolder.publish(new AgentHookEvent.Compressed(
+                String.valueOf(id), beforeMessages, messages.size(), summary.trim().length()));
     }
 
     /** 调用 LLM 把旧摘要（若有）与消息列表合并压缩成一段中文摘要 */

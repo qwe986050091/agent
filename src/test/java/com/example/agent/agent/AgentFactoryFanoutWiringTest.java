@@ -45,6 +45,7 @@ class AgentFactoryFanoutWiringTest {
                 skillManager, ragProvider,
                 mock(InjectionRuleScanner.class), mock(SafetyProperties.class),
                 new ContextProperties(),
+                new com.example.agent.context.ToolResultProperties(),
                 router, executor,
                 fanoutEnabled, mock(AgentPlanner.class), 4, 4, 15);
     }

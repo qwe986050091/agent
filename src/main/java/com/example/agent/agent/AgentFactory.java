@@ -94,6 +94,8 @@ public class AgentFactory {
     private final SafetyProperties safetyProperties;
     /** 上下文预算配置（agent.context.*，P1-D） */
     private final ContextProperties contextProperties;
+    /** 工具结果治理配置（agent.tool-result.*，P0） */
+    private final com.example.agent.context.ToolResultProperties toolResultProperties;
     /** 意图路由：把本轮交给命中的单个专家（默认关闭） */
     private final IntentRouter intentRouter;
     /** fan-out 并行执行器 */
@@ -124,6 +126,7 @@ public class AgentFactory {
                         InjectionRuleScanner injectionRuleScanner,
                         SafetyProperties safetyProperties,
                         ContextProperties contextProperties,
+                        com.example.agent.context.ToolResultProperties toolResultProperties,
                         IntentRouter intentRouter,
                         FanoutExecutor fanoutExecutor,
                         @Value("${agent.fanout.enabled:false}") boolean fanoutEnabled,
@@ -140,6 +143,7 @@ public class AgentFactory {
         this.injectionRuleScanner = injectionRuleScanner;
         this.safetyProperties = safetyProperties;
         this.contextProperties = contextProperties;
+        this.toolResultProperties = toolResultProperties;
         this.intentRouter = intentRouter;
         this.fanoutExecutor = fanoutExecutor;
         this.fanoutEnabled = fanoutEnabled;
@@ -351,10 +355,13 @@ public class AgentFactory {
     private SummarizingChatMemory restoreMemory(AgentChatRequest request, ContextBudget budget) {
         ContextBudget.MemoryPlan plan = budget.applyMemoryInputs(
                 request.summary(), request.history(), request.message(), request.images());
+        // 工具结果治理（P0）：回合内 ReAct 循环追加的工具结果不在四段预算内，需单独限流
+        com.example.agent.context.ToolResultGovernor governor =
+                new com.example.agent.context.ToolResultGovernor(toolResultProperties, request.memoryId());
         return SummarizingChatMemory.restore(
                 request.memoryId(), chatModel,
                 MEMORY_MAX_MESSAGES, MEMORY_KEEP_RECENT,
-                plan.summary(), plan.history());
+                plan.summary(), plan.history(), governor);
     }
 
     /** 创建请求级上下文预算（collector 可为 null：无 trace 的装配单测/内部调用） */

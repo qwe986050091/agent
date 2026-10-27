@@ -1,5 +1,7 @@
 package com.example.agent.observability;
 
+import com.example.agent.hooks.AgentHookEvent;
+import com.example.agent.hooks.HookContextHolder;
 import com.example.agent.observability.model.ContextTraceEvent;
 import com.example.agent.observability.model.DelegationTraceEvent;
 import com.example.agent.observability.model.RagSegment;
@@ -215,6 +217,11 @@ public class TraceCollector {
         } catch (Exception ignore) {
             // 指标异常不影响对话
         }
+        // 旁路通知（审计/联动）：与 SSE tool 事件同源，异步分发，失败不影响对话
+        HookContextHolder.publish(new AgentHookEvent.ToolExecuted(
+                traceId, userId, conversationId, name,
+                truncate(pending.request.arguments(), MAX_ARGUMENTS),
+                resultPreview, !error, event.durationMs(), pending.agentId));
     }
 
     /** 记录一次 RAG 检索（query + 召回片段），无命中时 segments 为空 */
@@ -242,6 +249,8 @@ public class TraceCollector {
         } catch (Exception ignore) {
             // 指标异常不影响对话
         }
+        HookContextHolder.publish(new AgentHookEvent.SafetyMatch(
+                traceId, event.channel(), event.verdict(), event.action()));
     }
 
     /** 组装回合末用量事件 */

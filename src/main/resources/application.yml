@@ -57,6 +57,17 @@ agent:
     history-max-tokens: 4500       # 历史段预算（含本轮消息；超出从最旧消息丢弃）
     retrieval-max-tokens: 2500     # 检索片段预算（含引用规则固定开销）
     min-history-messages: 2        # 历史段至少保留的最近消息条数
+  # ===== 工具结果治理（P0）：ReAct 循环内的工具结果预算 =====
+  # 四段上下文预算（agent.context.*）不覆盖工具结果，一次超长网页/MCP 返回即可挤爆上下文。
+  # 单条超限保留头尾并截断；累计超限从最旧工具结果开始清理，始终保留最新一条。
+  # 落盘仅用于审计/排障（agent 没有文件读取工具，模型看不到原文）。
+  tool-result:
+    enabled: true
+    max-chars-per-result: 8000   # 与内置工具自限（网页 8000 / 代码输出 8000）对齐
+    max-total-chars-per-turn: 24000
+    head-chars: 3000
+    tail-chars: 1000
+    spill-dir: ${AGENT_TOOL_RESULT_SPILL_DIR:}   # 空 = 不落盘
   # ===== 子代理（Agent-as-Tool）：技能声明 type=agent 时，主 Agent 以委派工具方式调用 =====
   subagent:
     enabled: true                    # 关闭时 type=agent 的技能退化为普通技能（工具直挂主 Agent）
@@ -80,6 +91,24 @@ agent:
   approval:
     # 前端审批弹窗等待时长（秒）；超时高危操作自动拒绝。必须小于 SSE 总超时 5 分钟
     timeout-seconds: 60
+    # 装配期拒绝：命中的技能整包不下发（工具与系统提示都看不到），模型无从调用
+    denied-skills: []
+    # 参数级规则（自上而下，首个命中生效；args-regex 为正则全匹配，留空=任意参数）
+    # action: allow（免确认）| deny（直接拒绝）| confirm（强制人工确认，覆盖 AUTO 与会话级授权）
+    rules:
+      # - tool: fetchWebPage
+      #   args-regex: "https://(docs|api)\\.example\\.com/.*"
+      #   action: allow
+      # - tool: sendHttpRequest
+      #   args-regex: ".*://(127\\.0\\.0\\.1|localhost).*"
+      #   action: deny
+  # ===== 可编程扩展点（P1）：Hook 事件订阅 =====
+  # 实现 @Component AgentHook 即可订阅；异步有界分发，单个 Hook 异常/超时不阻塞对话。
+  # 与 trace 事件的区别：Hook 只在进程内消费，不改变 agent→backend 协议。
+  hooks:
+    enabled: true
+    max-parallel: 2              # 分发线程数（有界队列 256，满则丢弃并计数）
+    timeout-ms: 500              # 单个 Hook 耗时告警阈值（不中断执行）
   # ===== 多模态（P1-8）：deepseek-flash 原生支持图片输入，此处仅为防御性校验闸门 =====
   multimodal:
     max-images: 6              # 单回合图片数上限（backend 已收紧到 3，agent 侧兜底）

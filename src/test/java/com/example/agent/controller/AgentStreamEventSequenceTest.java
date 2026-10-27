@@ -63,7 +63,8 @@ class AgentStreamEventSequenceTest {
                 mock(LlmInjectionClassifier.class),
                 mock(SensitiveValueRegistry.class),
                 // 内容安全默认关闭：scanOutput 在此件上短路，不影响收尾事件序列
-                mock(SafetyProperties.class));
+                mock(SafetyProperties.class),
+                mock(com.example.agent.approval.ApprovalRules.class));
         collector = TraceContextHolder.start("trace-p2-12", "u1", 0L, event -> {
         }, null);
     }

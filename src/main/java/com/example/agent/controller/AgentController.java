@@ -114,6 +114,8 @@ public class AgentController {
     private final SensitiveValueRegistry sensitiveValueRegistry;
     /** 内容安全配置（agent.safety.*） */
     private final SafetyProperties safetyProperties;
+    /** 参数级审批规则（agent.approval.rules / denied-skills） */
+    private final com.example.agent.approval.ApprovalRules approvalRules;
 
     /** 高危工具审批等待时长（agent.approval.timeout-seconds），超时自动拒绝 */
     @org.springframework.beans.factory.annotation.Value("${agent.approval.timeout-seconds:60}")
@@ -135,7 +137,8 @@ public class AgentController {
                            InjectionRuleScanner injectionRuleScanner,
                            LlmInjectionClassifier injectionClassifier,
                            SensitiveValueRegistry sensitiveValueRegistry,
-                           SafetyProperties safetyProperties) {
+                           SafetyProperties safetyProperties,
+                           com.example.agent.approval.ApprovalRules approvalRules) {
         this.agentFactory = agentFactory;
         this.toolRegistry = toolRegistry;
         this.skillManager = skillManager;
@@ -145,6 +148,7 @@ public class AgentController {
         this.injectionClassifier = injectionClassifier;
         this.sensitiveValueRegistry = sensitiveValueRegistry;
         this.safetyProperties = safetyProperties;
+        this.approvalRules = approvalRules;
     }
 
     // ==================== 对话接口 ====================
@@ -190,7 +194,8 @@ public class AgentController {
         // 同步通道无 SSE 确认出口：gate 存在但 sink=null，高危工具一律自动拒绝
         ApprovalContextHolder.start(new ApprovalGate(
                 approvalRegistry, approvalTimeoutSeconds, req.userId(), req.conversationId(), traceId,
-                req.allowedTools() == null ? Set.of() : new HashSet<>(req.allowedTools()), null));
+                req.allowedTools() == null ? Set.of() : new HashSet<>(req.allowedTools()), null,
+                approvalRules));
         long start = System.nanoTime();
         try {
             AgentFactory.AgentChatResult result;
@@ -226,9 +231,19 @@ public class AgentController {
     private ChatResponse buildResponse(AgentFactory.AgentChatRequest req, TraceCollector collector,
                                        String answer, String summary) {
         UsageTraceEvent usage = collector.toUsageEvent(false);
+        publishTurnCompleted(collector, usage);
         return new ChatResponse(req.userId(), req.message(), answer, summary,
                 collector.traceId(), usage, collector.tools(), collector.retrievals(),
                 collector.safeties(), collector.delegationEvents(), collector.contextEvent());
+    }
+
+    /** 回合结束旁路通知（Hook 订阅者：审计/外部联动），不改变对外协议 */
+    private void publishTurnCompleted(TraceCollector collector, UsageTraceEvent usage) {
+        com.example.agent.hooks.HookContextHolder.publish(
+                new com.example.agent.hooks.AgentHookEvent.TurnCompleted(
+                        collector.traceId(), collector.userId(), collector.conversationId(),
+                        usage.model(), usage.totalTokens(), usage.rounds(),
+                        usage.fallback(), usage.cancelled(), usage.durationMs()));
     }
 
     private static long elapsedMs(long startNanos) {
@@ -345,7 +360,8 @@ public class AgentController {
         ApprovalGate gate = new ApprovalGate(
                 approvalRegistry, approvalTimeoutSeconds, req.userId(), req.conversationId(), traceId,
                 req.allowedTools() == null ? Set.of() : new HashSet<>(req.allowedTools()),
-                approvalRequest -> emitApprovalRequest(emitter, cancelled, approvalRequest));
+                approvalRequest -> emitApprovalRequest(emitter, cancelled, approvalRequest),
+                approvalRules);
         gateRef.set(gate);
         ApprovalContextHolder.start(gate);
         long start = System.nanoTime();
@@ -566,7 +582,9 @@ public class AgentController {
             if (context != null) {
                 emitTraceEvent(emitter, cancelled, context);
             }
-            emitTraceEvent(emitter, cancelled, collector.toUsageEvent(false));
+            UsageTraceEvent usage = collector.toUsageEvent(false);
+            emitTraceEvent(emitter, cancelled, usage);
+            publishTurnCompleted(collector, usage);
             // 摘要回传事件：JSON 序列化（换行等特殊字符被转义，保证单行 data）
             emitter.send(SseEmitter.event()
                     .name("memory")
@@ -585,7 +603,9 @@ public class AgentController {
     void sendConverged(SseEmitter emitter, AgentFactory.AgentChatRequest req,
                        TraceCollector collector, Consumer<String> recordOutcome) {
         try {
-            emitTraceEvent(emitter, new AtomicBoolean(false), collector.toUsageEvent(false));
+            UsageTraceEvent usage = collector.toUsageEvent(false);
+            emitTraceEvent(emitter, new AtomicBoolean(false), usage);
+            publishTurnCompleted(collector, usage);
             emitter.send(SseEmitter.event().data(TOOL_LOOP_LIMIT_MESSAGE));
             emitter.send(SseEmitter.event().name("memory")
                     .data(Map.of("summary", req.summary() == null ? "" : req.summary()),

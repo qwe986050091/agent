@@ -1,9 +1,11 @@
 package com.example.agent.skill;
 
+import com.example.agent.approval.ApprovalRules;
 import com.example.agent.tools.ToolRegistry;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -39,6 +41,8 @@ public class SkillManager {
     private final ToolRegistry toolRegistry;
     /** 子代理工厂：把 type=agent 的技能构建成主代理可委派的子代理（Agent-as-Tool） */
     private final com.example.agent.agent.SubAgentFactory subAgentFactory;
+    /** 参数级审批规则（装配期拒绝技能；可空：单测/未启用） */
+    private ApprovalRules approvalRules;
 
     public SkillManager(List<Skill> builtinSkillBeans, ToolRegistry toolRegistry,
                         com.example.agent.mcp.McpClientManager mcpClientManager,
@@ -52,6 +56,12 @@ public class SkillManager {
         for (Skill mcpSkill : mcpClientManager.skills()) {
             builtinSkills.put(mcpSkill.name(), mcpSkill);
         }
+    }
+
+    /** 可选注入：未配置规则时保持原有行为 */
+    @Autowired(required = false)
+    public void setApprovalRules(ApprovalRules approvalRules) {
+        this.approvalRules = approvalRules;
     }
 
     @PostConstruct
@@ -94,6 +104,11 @@ public class SkillManager {
         }
         for (SkillDefinition def : definitions) {
             if (def == null || def.getName() == null || def.getName().isBlank()) {
+                continue;
+            }
+            // 装配期拒绝（P1）：整技能不下发（工具列表与系统提示都看不到），而非调用时才拦
+            if (approvalRules != null && approvalRules.isSkillDenied(def.getName())) {
+                log.warn("[SkillManager] 技能「{}」命中审批拒绝名单，本轮跳过装配", def.getName());
                 continue;
             }
             Skill builtin = builtinSkills.get(def.getName());

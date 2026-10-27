@@ -1,5 +1,7 @@
 package com.example.agent.approval;
 
+import com.example.agent.hooks.AgentHookEvent;
+import com.example.agent.hooks.HookContextHolder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,6 +34,8 @@ public class ApprovalGate {
     private final String traceId;
     private final Long conversationId;
     private final Set<String> allowedTools;
+    /** 参数级规则（可为 null：单测/未配置规则） */
+    private final ApprovalRules rules;
     /** 审批事件下发出口；null = 同步通道（不支持确认） */
     private final Consumer<ApprovalRequest> sink;
 
@@ -42,6 +46,17 @@ public class ApprovalGate {
                         String traceId,
                         Set<String> allowedTools,
                         Consumer<ApprovalRequest> sink) {
+        this(registry, timeoutSeconds, userId, conversationId, traceId, allowedTools, sink, null);
+    }
+
+    public ApprovalGate(ApprovalRegistry registry,
+                        long timeoutSeconds,
+                        String userId,
+                        Long conversationId,
+                        String traceId,
+                        Set<String> allowedTools,
+                        Consumer<ApprovalRequest> sink,
+                        ApprovalRules rules) {
         this.registry = registry;
         this.timeoutSeconds = timeoutSeconds;
         this.userId = userId;
@@ -49,6 +64,7 @@ public class ApprovalGate {
         this.conversationId = conversationId;
         this.allowedTools = allowedTools == null ? Set.of() : Set.copyOf(allowedTools);
         this.sink = sink;
+        this.rules = rules;
     }
 
     /**
@@ -73,15 +89,31 @@ public class ApprovalGate {
      * 执行审批检查；通过则正常返回，不通过抛 {@link ApprovalDeniedException}。
      */
     public void check(String toolName, String argsPreview, ToolRiskPolicy.Policy policy) {
-        if (policy.mode() == ApprovalMode.AUTO) {
+        // 0) 参数级规则（P1）：deny 直接拒绝；allow 免确认；confirm 强制走人工（覆盖 AUTO 与会话级授权）
+        ApprovalRules.Action rule = rules == null ? null : rules.evaluate(toolName, argsPreview);
+        if (rule == ApprovalRules.Action.DENY) {
+            log.warn("[Approval] 命中参数级禁止规则，拒绝执行: traceId={}, tool={}, args={}",
+                    traceId, toolName, truncate(argsPreview));
+            publishDenied(toolName, "命中参数级禁止规则");
+            throw new ApprovalDeniedException("「" + policy.title() + "」命中当前操作的禁止规则，已阻止执行。");
+        }
+        if (rule == ApprovalRules.Action.ALLOW) {
+            log.info("[Approval] 命中参数级放行规则，直接执行: traceId={}, tool={}", traceId, toolName);
             return;
         }
-        if (allowedTools.contains(toolName)) {
-            log.info("[Approval] 命中会话级授权，直接放行: traceId={}, tool={}", traceId, toolName);
-            return;
+        boolean forceConfirm = rule == ApprovalRules.Action.CONFIRM;
+        if (!forceConfirm) {
+            if (policy.mode() == ApprovalMode.AUTO) {
+                return;
+            }
+            if (allowedTools.contains(toolName)) {
+                log.info("[Approval] 命中会话级授权，直接放行: traceId={}, tool={}", traceId, toolName);
+                return;
+            }
         }
         if (sink == null) {
             log.warn("[Approval] 同步通道不支持确认，拒绝高危操作: traceId={}, tool={}", traceId, toolName);
+            publishDenied(toolName, "同步通道不支持人工确认");
             throw new ApprovalDeniedException(
                     "「" + policy.title() + "」属于高危操作，需要在对话界面经用户确认后才能执行；"
                             + "当前调用通道不支持确认，操作已阻止。");
@@ -106,17 +138,30 @@ public class ApprovalGate {
         } catch (Exception e) {
             log.warn("[Approval] 审批请求下发失败，拒绝执行: traceId={}, tool={}, err={}",
                     traceId, toolName, e.getMessage());
+            publishDenied(toolName, "审批请求下发失败（连接可能已断开）");
             throw new ApprovalDeniedException("审批请求下发失败（连接可能已断开），操作已阻止");
         }
 
-        ApprovalDecision decision = awaitDecision(entry);
+        ApprovalDecision decision;
+        try {
+            decision = awaitDecision(entry);
+        } catch (ApprovalDeniedException e) {
+            publishDenied(toolName, e.getMessage());
+            throw e;
+        }
         if (decision.approved()) {
             log.info("[Approval] 用户批准，继续执行: traceId={}, tool={}, remember={}",
                     traceId, toolName, decision.remember());
             return;
         }
         log.warn("[Approval] 用户拒绝/超时/取消，阻止执行: traceId={}, tool={}", traceId, toolName);
+        publishDenied(toolName, "用户拒绝/超时/取消");
         throw new ApprovalDeniedException("用户未批准「" + policy.title() + "」，操作未执行。");
+    }
+
+    /** 通知 Hook 订阅者：一次工具调用被拒绝（审计/告警用，不影响主流程） */
+    private void publishDenied(String toolName, String reason) {
+        HookContextHolder.publish(new AgentHookEvent.ToolDenied(traceId, userId, toolName, reason));
     }
 
     /** 阻塞等待决策（超时已由 ApprovalRegistry 施加在原始 future 上），超时按拒绝处理 */
